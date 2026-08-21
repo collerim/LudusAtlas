@@ -9,6 +9,12 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+if (process.env.ALLOW_ARCHIVED_PLAYCOUNTER_LANDING !== "1") {
+  throw new Error(
+    "PlayCounter IndexNow submission is archived and is not part of LudusAtlas publishing.",
+  );
+}
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOST = "playcounter.app";
 const KEY = "ca4ea6ad3df5381db4ba50053b8f2e22";
@@ -38,5 +44,7 @@ const response = await fetch("https://api.indexnow.org/indexnow", {
   }),
 });
 
-console.log(`Submitted ${urlList.length} URLs - ${response.status} ${response.statusText}`);
+console.log(
+  `Submitted ${urlList.length} URLs - ${response.status} ${response.statusText}`,
+);
 if (!response.ok) console.error(await response.text());

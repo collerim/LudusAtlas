@@ -1,111 +1,31 @@
-name: Deploy prod
+name: Release LudusAtlas for Windows
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version from tauri.conf.json, with or without the v prefix"
+        required: true
+        type: string
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   NODE_VERSION: "22"
   PNPM_VERSION: "9.15.4"
-  DESKTOP_TAURI_CONFIG: apps/desktop/src-tauri/tauri.conf.json
-  AZURE_RELEASE_BASE_URL: https://stplaycountereuw.blob.core.windows.net/releases
-  AZURE_STORAGE_CONTAINER: releases
 
 jobs:
-  detect-desktop-version:
-    name: Detect desktop version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.current }}
-      version_changed: ${{ steps.version.outputs.changed }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Compare desktop version
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          current="$(node scripts/ci/read-desktop-version.mjs)"
-          changed="true"
-          before="${{ github.event.before }}"
-
-          if [ "${before}" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${before}:${DESKTOP_TAURI_CONFIG}" 2>/dev/null; then
-            tmp_previous="$(mktemp)"
-            git show "${before}:${DESKTOP_TAURI_CONFIG}" > "${tmp_previous}"
-            previous="$(node scripts/ci/read-desktop-version.mjs "${tmp_previous}")"
-
-            if [ "${current}" = "${previous}" ]; then
-              changed="false"
-            fi
-          fi
-
-          echo "current=${current}" >> "${GITHUB_OUTPUT}"
-          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
-          echo "Desktop version: ${current}; changed: ${changed}"
-
-  deploy-api:
-    name: Build and deploy API
-    runs-on: ubuntu-latest
-    environment: production
-    needs:
-      - detect-desktop-version
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build API
-        run: |
-          pnpm --filter @playcounter/shared build
-          pnpm --filter @playcounter/api build
-
-      - name: Run database migrations
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: pnpm --filter @playcounter/api db:migrate
-
-      - name: Package API
-        run: node scripts/ci/package-api.mjs
-
-      - name: Deploy API to Azure App Service
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: .deploy/api/playcounter-api.zip
-
-  build-desktop-windows:
-    name: Build Windows desktop
+  release-windows:
+    name: Build and publish Windows installer
     runs-on: windows-latest
-    permissions:
-      contents: read
-      id-token: write
-    needs:
-      - detect-desktop-version
-      - deploy-api
-    if: needs.detect-desktop-version.outputs.version_changed == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -132,247 +52,114 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Check desktop version sync
-        run: node scripts/ci/check-desktop-version-sync.mjs
+      - name: Check LudusAtlas fork boundaries
+        run: node scripts/ci/check-fork-boundaries.mjs
 
-      - name: Build desktop executable
-        run: |
-          pnpm --filter @playcounter/shared build
-          corepack pnpm --filter @playcounter/desktop exec tauri build --ci --no-bundle
-
-      - name: Log in to Azure for Artifact Signing
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Sign PlayCounter executable
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\apps\desktop\src-tauri\target\release\playcounter.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: PlayCounter
-          description-url: https://playcounter.app
-          exclude-environment-credential: true
-          exclude-azure-cli-credential: false
-
-      - name: Bundle signed desktop executable
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: corepack pnpm --filter @playcounter/desktop exec tauri bundle --ci --bundles nsis
-
-      - name: Sign NSIS installer
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-          files-folder: ${{ github.workspace }}\apps\desktop\src-tauri\target\release\bundle\nsis
-          files-folder-filter: exe
-          files-folder-recurse: false
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: PlayCounter Installer
-          description-url: https://playcounter.app
-          exclude-environment-credential: true
-          exclude-azure-cli-credential: false
-
-      - name: Regenerate updater signature and verify Authenticode
+      - name: Validate release version
+        id: version
         shell: pwsh
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $target = Join-Path $env:GITHUB_WORKSPACE "apps\desktop\src-tauri\target\release"
-          $application = Join-Path $target "playcounter.exe"
-          $installers = @(Get-ChildItem -LiteralPath (Join-Path $target "bundle\nsis") -Filter "*-setup.exe" -File)
+          if ($env:EVENT_NAME -eq "workflow_dispatch" -and $env:REF_NAME -ne "main") {
+            throw "Manual releases must run from the main branch."
+          }
 
+          node scripts/ci/check-desktop-version-sync.mjs
+          $configured = node scripts/ci/read-desktop-version.mjs
+          $requested = $env:REQUESTED_VERSION.Trim()
+          if ($requested.StartsWith("v")) {
+            $requested = $requested.Substring(1)
+          }
+
+          if ($requested -ne $configured) {
+            throw "Requested version $requested does not match configured desktop version $configured."
+          }
+
+          "version=$configured" >> $env:GITHUB_OUTPUT
+          "tag=v$configured" >> $env:GITHUB_OUTPUT
+          $isPrerelease = $configured.StartsWith("0.") -or $configured.Contains("-")
+          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Run tests and frontend builds
+        run: pnpm turbo run test typecheck build
+
+      - name: Build Windows NSIS installer
+        run: |
+          pnpm --filter @playcounter/shared build
+          corepack pnpm --filter @playcounter/desktop exec tauri build --ci --bundles nsis
+
+      - name: Stage installer and checksum
+        id: artifact
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $application = Join-Path $env:GITHUB_WORKSPACE "apps\desktop\src-tauri\target\release\ludusatlas.exe"
+          if (-not (Test-Path -LiteralPath $application -PathType Leaf)) {
+            throw "Expected LudusAtlas executable at $application."
+          }
+
+          $bundle = Join-Path $env:GITHUB_WORKSPACE "apps\desktop\src-tauri\target\release\bundle\nsis"
+          $installers = @(Get-ChildItem -LiteralPath $bundle -Filter "*-setup.exe" -File)
           if ($installers.Count -ne 1) {
             throw "Expected exactly one NSIS installer, found $($installers.Count)."
           }
-
-          corepack pnpm --filter @playcounter/desktop exec tauri signer sign $installers[0].FullName
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to regenerate the Tauri updater signature."
+          if ($installers[0].Name -notmatch "LudusAtlas") {
+            throw "Installer has an unexpected product name: $($installers[0].Name)."
           }
 
-          foreach ($file in @($application, $installers[0].FullName)) {
-            $signature = Get-AuthenticodeSignature -LiteralPath $file
-            if ($signature.Status -ne "Valid") {
-              throw "Invalid Authenticode signature for ${file}: $($signature.Status) ($($signature.StatusMessage))"
-            }
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE ".deploy\release"
+          New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
+          $releaseName = "LudusAtlas-Setup-v$($env:RELEASE_VERSION).exe"
+          $releasePath = Join-Path $releaseDirectory $releaseName
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $releasePath
 
-            Write-Host "Verified $file"
-            Write-Host "Publisher: $($signature.SignerCertificate.Subject)"
-          }
+          $aliasName = "LudusAtlas-Setup.exe"
+          $aliasPath = Join-Path $releaseDirectory $aliasName
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $aliasPath
 
-      - name: Upload Windows bundle artifact
+          $sha256 = (Get-FileHash -LiteralPath $releasePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha256  $releaseName" | Set-Content -LiteralPath "$releasePath.sha256" -Encoding utf8
+          "$sha256  $aliasName" | Set-Content -LiteralPath "$aliasPath.sha256" -Encoding utf8
+          "name=$releaseName" >> $env:GITHUB_OUTPUT
+          "sha256=$sha256" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-windows-bundle
-          path: apps/desktop/src-tauri/target/release/bundle
+          name: LudusAtlas-Windows-v${{ steps.version.outputs.version }}
+          path: .deploy/release/*
+          if-no-files-found: error
+          retention-days: 30
 
-  publish-desktop:
-    name: Publish desktop artifacts
-    runs-on: ubuntu-latest
-    environment: production
-    needs:
-      - detect-desktop-version
-      - build-desktop-windows
-    if: needs.detect-desktop-version.outputs.version_changed == 'true'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Download Windows bundle artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: desktop-windows-bundle
-          path: .deploy/desktop/windows
-
-      - name: Create updater manifest
-        run: node scripts/ci/create-tauri-latest-json.mjs ".deploy/desktop/windows" "${{ env.AZURE_RELEASE_BASE_URL }}" .deploy/desktop/latest.json
-
-      - name: Upload desktop artifacts to Azure Blob Storage
-        env:
-          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
-          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
-        run: |
-          set -euo pipefail
-          container="${AZURE_STORAGE_CONTAINER:-releases}"
-
-          find .deploy/desktop -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.sig' \) -print0 | while IFS= read -r -d '' file; do
-            blob_name="$(basename "$file")"
-            case "$file" in
-              *desktop-macos-x86_64-bundle*) blob_name="macos-x86_64-${blob_name}" ;;
-              *desktop-macos-aarch64-bundle*) blob_name="macos-aarch64-${blob_name}" ;;
-            esac
-
-            az storage blob upload \
-              --account-name "$AZURE_STORAGE_ACCOUNT" \
-              --account-key "$AZURE_STORAGE_KEY" \
-              --container-name "$container" \
-              --name "$blob_name" \
-              --file "$file" \
-              --overwrite true
-          done
-
-          az storage blob upload \
-            --account-name "$AZURE_STORAGE_ACCOUNT" \
-            --account-key "$AZURE_STORAGE_KEY" \
-            --container-name "$container" \
-            --name latest.json \
-            --file .deploy/desktop/latest.json \
-            --content-type application/json \
-            --overwrite true
-
-  release-github:
-    name: Publish GitHub release
-    runs-on: ubuntu-latest
-    needs:
-      - detect-desktop-version
-      - build-desktop-windows
-    if: needs.detect-desktop-version.outputs.version_changed == 'true'
-    permissions:
-      contents: write
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Download Windows bundle artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: desktop-windows-bundle
-          path: .deploy/desktop/windows
-
-      - name: Stage installer and compute checksum
-        id: artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          exe="$(find .deploy/desktop/windows -type f -name '*-setup.exe' | head -n1)"
-          if [ -z "${exe}" ]; then
-            echo "No NSIS installer (*-setup.exe) found in bundle artifact" >&2
-            exit 1
-          fi
-          mkdir -p .deploy/release
-          name="$(basename "${exe}")"
-          cp "${exe}" ".deploy/release/${name}"
-          cp "${exe}" ".deploy/release/PlayCounter-Setup.exe"
-          sha="$(sha256sum ".deploy/release/${name}" | awk '{print $1}')"
-          printf '%s  %s\n' "${sha}" "${name}" > ".deploy/release/${name}.sha256"
-          printf '%s  %s\n' "${sha}" "PlayCounter-Setup.exe" > ".deploy/release/PlayCounter-Setup.exe.sha256"
-          {
-            echo "exe_name=${name}"
-            echo "sha=${sha}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Create updater manifest
-        run: node scripts/ci/create-tauri-latest-json.mjs ".deploy/desktop/windows" "https://github.com/zntr1/PlayCounter/releases/download/v${{ needs.detect-desktop-version.outputs.version }}" .deploy/release/latest.json
-
-      - name: Scan installer on VirusTotal
-        continue-on-error: true
-        uses: crazy-max/ghaction-virustotal@v4
-        with:
-          vt_api_key: ${{ secrets.VT_API_KEY }}
-          files: |
-            .deploy/release/*-setup.exe
-
-      - name: Create GitHub release
+      - name: Create LudusAtlas GitHub prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.detect-desktop-version.outputs.version }}
-          name: PlayCounter v${{ needs.detect-desktop-version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: LudusAtlas v${{ steps.version.outputs.version }}
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.version.outputs.prerelease }}
           fail_on_unmatched_files: true
           files: |
-            .deploy/release/${{ steps.artifact.outputs.exe_name }}
-            .deploy/release/${{ steps.artifact.outputs.exe_name }}.sha256
-            .deploy/release/PlayCounter-Setup.exe
-            .deploy/release/PlayCounter-Setup.exe.sha256
-            .deploy/release/latest.json
+            .deploy/release/${{ steps.artifact.outputs.name }}
+            .deploy/release/${{ steps.artifact.outputs.name }}.sha256
+            .deploy/release/LudusAtlas-Setup.exe
+            .deploy/release/LudusAtlas-Setup.exe.sha256
           body: |
-            ## PlayCounter v${{ needs.detect-desktop-version.outputs.version }}
+            Windows-first LudusAtlas development release.
 
-            Tracks real playtime for every game you play - whatever launcher it
-            came from - by watching what's running on your PC. Free, open source,
-            no account.
+            LudusAtlas is an independent project based on the open-source
+            PlayCounter tracking core. It is not an official PlayCounter release.
 
-            ### Download
-            **`${{ steps.artifact.outputs.exe_name }}`** - Windows installer (NSIS).
+            Download `${{ steps.artifact.outputs.name }}` and verify its SHA-256:
 
-            ### Verify your download (SHA-256)
-            ```
-            ${{ steps.artifact.outputs.sha }}
-            ```
-            Check it locally in PowerShell:
-            ```powershell
-            Get-FileHash .\${{ steps.artifact.outputs.exe_name }} -Algorithm SHA256
-            ```
+            `${{ steps.artifact.outputs.sha256 }}`
 
-            ### Independent malware scan
-            Scanned on VirusTotal (results by SHA-256):
-            https://www.virustotal.com/gui/file/${{ steps.artifact.outputs.sha }}
-
-            ---
-            PlayCounter is open source - both the client and the server it talks to live in this repository.
+            This development installer is not yet Authenticode-signed, so Windows
+            may display an unknown-publisher or SmartScreen warning.

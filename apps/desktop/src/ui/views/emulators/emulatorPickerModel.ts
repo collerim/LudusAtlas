@@ -36,7 +36,7 @@ export function emulatorPickerCopy(
       eyebrow: `New game detected in ${observation.label}`,
       headline: observation.display,
       description:
-        "The emulator was closed. Pick the game to keep the tracked playtime.",
+        "The emulator stopped. Pick the game to keep the tracked playtime.",
       tone: "warning" as const,
     };
   }
@@ -49,7 +49,7 @@ export function emulatorPickerCopy(
         ? `Looking for a matching ${platformLabel} game…`
         : phase === "candidates"
           ? "Pick the game that is inside this file."
-          : "PlayCounter does not recognize this one. Search for the game once - your choice is remembered on this PC.",
+          : "LudusAtlas could not identify it. Search once — the choice is remembered on this PC.",
     tone: "accent" as const,
   };
 }

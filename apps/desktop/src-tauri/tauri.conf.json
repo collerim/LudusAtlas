@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PlayCounter",
-  "version": "1.1.7",
-  "identifier": "app.playcounter.desktop",
+  "productName": "LudusAtlas",
+  "version": "0.1.0",
+  "identifier": "app.ludusatlas.desktop",
   "build": {
     "beforeDevCommand": "corepack pnpm dev",
     "beforeBuildCommand": "corepack pnpm build:prod",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "PlayCounter",
+        "title": "LudusAtlas",
         "width": 1460,
         "height": 760,
         "minWidth": 920,
@@ -24,18 +24,14 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "$APPDATA/covers/**/*"
-        ]
+        "scope": ["$APPDATA/covers/**/*"]
       }
     }
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
-    "targets": [
-      "nsis"
-    ],
+    "createUpdaterArtifacts": false,
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -43,13 +39,5 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/zntr1/PlayCounter/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4RjM0OTY4QkNFMzE2QzYKUldUR0Z1TzhhRW56NkhGdWIxR0w3Yy80MXNhdi9iWDV6dHlhMmtjUkoxSUtUNVRSOGd3bzBrTWcK"
-    }
   }
 }

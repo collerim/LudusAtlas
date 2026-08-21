@@ -42,7 +42,7 @@ describe("notification titles", () => {
 
     expect(notification?.title).toBe("Test Game suggestion approved");
     expect(notification?.body).toBe(
-      "Suggested file: game.exe\n\nThanks for helping PlayCounter recognize it.",
+      "Suggested file: game.exe\n\nThanks for helping the PlayCounter Community recognize it.",
     );
     expect(notification && displayNotificationTitle(notification)).toBe(
       "👍 Test Game suggestion approved",

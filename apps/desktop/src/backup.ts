@@ -19,7 +19,7 @@ const BACKUP_VERSION = 2;
 type BackupEnvelope = {
   format: typeof BACKUP_FORMAT;
   version: number;
-  app: "PlayCounter";
+  app: "PlayCounter" | "LudusAtlas";
   exportedAt: string;
   data: Record<string, unknown>;
 };
@@ -37,7 +37,9 @@ const NOTIFICATION_STATE_KEYS = [
   "lastSeenReleaseNotesVersion",
 ];
 
-const JSON_FILTER = [{ name: "PlayCounter backup", extensions: ["json"] }];
+const JSON_FILTER = [
+  { name: "LudusAtlas or PlayCounter backup", extensions: ["json"] },
+];
 
 function readPersistedRaw(): Record<string, unknown> {
   return readPersistedRecord();
@@ -71,7 +73,7 @@ export function createTransferData(
 
 function defaultExportName() {
   const stamp = new Date().toISOString().slice(0, 10);
-  return `playcounter-backup-${stamp}.json`;
+  return `ludusatlas-backup-${stamp}.json`;
 }
 
 export type ExportResult = { path: string } | { cancelled: true };
@@ -86,7 +88,7 @@ export async function exportLocalData(): Promise<ExportResult> {
   const envelope: BackupEnvelope = {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
-    app: "PlayCounter",
+    app: "LudusAtlas",
     exportedAt: new Date().toISOString(),
     data: createTransferData(readPersistedRaw()),
   };
@@ -121,13 +123,18 @@ function parseEnvelope(raw: string): BackupEnvelope {
     (parsed as { data?: unknown }).data === null ||
     Array.isArray((parsed as { data?: unknown }).data)
   ) {
-    throw new Error("This is not a PlayCounter backup file.");
+    throw new Error("This is not a compatible backup file.");
   }
 
   const envelope = parsed as BackupEnvelope;
+  if (envelope.app !== "PlayCounter" && envelope.app !== "LudusAtlas") {
+    throw new Error(
+      "This backup was not created by LudusAtlas or PlayCounter.",
+    );
+  }
   if (envelope.version > BACKUP_VERSION) {
     throw new Error(
-      `This backup was created by a newer PlayCounter version (backup format ${envelope.version}). Update PlayCounter before importing it.`,
+      `This backup uses a newer compatible format (${envelope.version}). Update LudusAtlas before importing it.`,
     );
   }
 
@@ -138,8 +145,10 @@ function parseEnvelope(raw: string): BackupEnvelope {
  * Replaces all local data with the contents of a chosen backup file. Before
  * overwriting, the current local data is written to a timestamped backup file
  * under the app data directory so an accidental import can be undone. The
- * imported install UUID is carried over so the new machine reports as the same
- * install. Reloads the window afterward so the tracker re-hydrates cleanly.
+ * A LudusAtlas backup carries its install UUID for the existing transfer
+ * semantics. A PlayCounter backup deliberately drops that identity so two
+ * side-by-side applications never report as the same Community installation.
+ * Reloads the window afterward so the tracker re-hydrates cleanly.
  */
 export async function importLocalData(): Promise<ImportResult> {
   const path = await open({ multiple: false, filters: JSON_FILTER });
@@ -148,6 +157,13 @@ export async function importLocalData(): Promise<ImportResult> {
   const raw = await invoke<string>("read_text_file", { path });
   const envelope = parseEnvelope(raw);
   const data = createTransferData(envelope.data);
+  // PlayCounter and LudusAtlas may be installed side by side. Their anonymous
+  // Community identities must remain independent, so a PlayCounter backup
+  // transfers durable user data but never clones its install identity.
+  if (envelope.app === "PlayCounter") {
+    delete data.installUuid;
+    delete data.contributionOwnerUuid;
+  }
   data.notifications = [];
   data.discoveredReviewReminder = null;
   data.suppressStartupNotificationsOnce = true;
@@ -170,7 +186,7 @@ export async function importLocalData(): Promise<ImportResult> {
     const envelope: BackupEnvelope = {
       format: BACKUP_FORMAT,
       version: BACKUP_VERSION,
-      app: "PlayCounter",
+      app: "LudusAtlas",
       exportedAt: new Date().toISOString(),
       data: createTransferData(readPersistedRaw()),
     };

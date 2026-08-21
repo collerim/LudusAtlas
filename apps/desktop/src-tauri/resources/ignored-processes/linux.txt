@@ -1,4 +1,4 @@
-# PlayCounter built-in ignored processes for Linux.
+# LudusAtlas built-in ignored processes for Linux.
 # One process name per line. Lines starting with # are ignored.
 
 at-spi-bus-launcher

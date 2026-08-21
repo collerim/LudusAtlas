@@ -21,11 +21,15 @@ import { STORAGE_KEY } from "./persistence";
 
 const installUuid = "550e8400-e29b-41d4-a716-446655440000";
 
-function backup(data: Record<string, unknown>, version = 2) {
+function backup(
+  data: Record<string, unknown>,
+  version = 2,
+  app: "LudusAtlas" | "PlayCounter" = "LudusAtlas",
+) {
   return JSON.stringify({
     format: "playcounter-backup",
     version,
-    app: "PlayCounter",
+    app,
     exportedAt: "2026-08-19T00:00:00.000Z",
     data,
   });
@@ -111,6 +115,7 @@ describe("backup transfer data", () => {
     );
     const envelope = JSON.parse(write?.[1]?.contents as string);
     expect(envelope.version).toBe(2);
+    expect(envelope.app).toBe("LudusAtlas");
     expect(envelope.data.installUuid).toBe(installUuid);
     expect(envelope.data).not.toHaveProperty("notifications");
     expect(envelope.data).not.toHaveProperty("blacklist");
@@ -189,6 +194,49 @@ describe("backup import", () => {
     expect(reloadMock).toHaveBeenCalledOnce();
   });
 
+  it("imports PlayCounter durable data without cloning its Community identity", async () => {
+    const values = installLocalStorage(null);
+    openMock.mockResolvedValue("playcounter-backup.json");
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "read_text_file") {
+        return backup(
+          {
+            installUuid,
+            contributionOwnerUuid: installUuid,
+            sessions: [
+              {
+                id: 1,
+                gameId: 7,
+                exeName: "game.exe",
+                startedAt: "2026-08-19T00:00:00.000Z",
+                endedAt: "2026-08-19T01:00:00.000Z",
+                durationSeconds: 3600,
+              },
+            ],
+          },
+          2,
+          "PlayCounter",
+        );
+      }
+      return undefined;
+    });
+
+    await expect(importLocalData()).resolves.toMatchObject({
+      imported: true,
+      sessions: 1,
+    });
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "adopt_install_uuid",
+      expect.anything(),
+    );
+    const imported = JSON.parse(values.get(STORAGE_KEY) ?? "{}");
+    expect(imported.sessions).toHaveLength(1);
+    expect(imported).not.toHaveProperty("installUuid");
+    expect(imported).not.toHaveProperty("contributionOwnerUuid");
+    expect(reloadMock).toHaveBeenCalledOnce();
+  });
+
   it("rejects a newer backup format before changing local data", async () => {
     const existing = JSON.stringify({ sessions: [{ id: 1 }] });
     const values = installLocalStorage(existing);
@@ -199,7 +247,7 @@ describe("backup import", () => {
     });
 
     await expect(importLocalData()).rejects.toThrow(
-      "created by a newer PlayCounter version",
+      "uses a newer compatible format",
     );
     expect(values.get(STORAGE_KEY)).toBe(existing);
     expect(reloadMock).not.toHaveBeenCalled();

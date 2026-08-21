@@ -1120,7 +1120,7 @@ function GameLibraryCard({
       addToast({
         tone: "error",
         title: `Could not ignore ${exeName}`,
-        detail: "PlayCounter could not ignore it on this PC. Try again.",
+        detail: "LudusAtlas could not ignore it on this PC. Try again.",
       });
       return;
     }
@@ -1129,7 +1129,7 @@ function GameLibraryCard({
         tone: "error",
         title: `${exeName} ignored`,
         detail:
-          "It comes back when you restart PlayCounter - the ignore file could not be saved.",
+          "It comes back when you restart LudusAtlas - the ignore file could not be saved.",
       });
       return;
     }
@@ -2299,8 +2299,8 @@ function StopTrackingDialog({
         <h2 className="text-lg font-semibold text-text">Ignore {game.name}?</h2>
         <p className="mt-2 text-sm text-text-muted">
           {game.emulatorLabels.length > 0
-            ? "PlayCounter will ignore this local emulator-content mapping from now on. The emulator itself remains detectable."
-            : "PlayCounter ignores this game's file from now on - it will never be tracked again. You can undo this anytime under Discovered → Ignored."}
+            ? "LudusAtlas will ignore this local emulator-content mapping from now on. The emulator itself remains detectable."
+            : "LudusAtlas ignores this game's file from now on - it will never be tracked again. You can undo this anytime under Discovered → Ignored."}
         </p>
         {game.sessionCount > 0 ? (
           <p className="mt-2 text-sm text-text-muted">
@@ -2351,7 +2351,7 @@ function RemoveGameDialog({
         </h2>
         <p className="mt-2 text-sm text-text-muted">
           The game and its file match are removed, and a running session stops.
-          PlayCounter will detect it again the next time you play - use Ignore
+          LudusAtlas will detect it again the next time you play - use Ignore
           game if you want it gone for good.
         </p>
         <div className="mt-5 grid gap-2 sm:grid-cols-3">
@@ -2452,7 +2452,7 @@ function AddPlaytimeDialog({
 
         <div className="p-5">
           <p className="text-sm leading-6 text-text-muted">
-            Use this when PlayCounter missed a session you actually played.
+            Use this when LudusAtlas missed a session you actually played.
             Choose how long you played and when the session ended.
           </p>
 
@@ -2613,7 +2613,7 @@ function AdjustPlaytimeDialog({
 
         <div className="p-5">
           <p className="text-sm leading-6 text-text-muted">
-            Already played this game before using PlayCounter? Enter the full
+            Already played this game before using LudusAtlas? Enter the full
             playtime shown by Steam or another launcher. You can also use this
             to correct a total that is wrong.
           </p>
@@ -2883,8 +2883,8 @@ function MatchCheckDialog({
           <AlertTriangle size={18} className="mt-0.5 shrink-0" />
           <span>
             {flaggedIdentifier.reason === "not_a_game"
-              ? "Apps that are not games use this file name too, so PlayCounter no longer picks a game automatically."
-              : "Several games use this file name, so PlayCounter no longer picks a game automatically."}
+              ? "Apps that are not games use this file name too, so LudusAtlas no longer picks a game automatically."
+              : "Several games use this file name, so LudusAtlas no longer picks a game automatically."}
           </span>
         </div>
       ) : null}

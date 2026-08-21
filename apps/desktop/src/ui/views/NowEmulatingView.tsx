@@ -148,7 +148,7 @@ export function NowEmulatingView() {
         <Panel className="p-5">
           <h2 className="font-semibold text-text">Emulator running</h2>
           <p className="mt-1 text-sm text-text-muted">
-            {runningHosts[0]?.exeName} is running. PlayCounter is watching for a
+            {runningHosts[0]?.exeName} is running. LudusAtlas is watching for a
             game to load.
           </p>
         </Panel>

@@ -1,25 +1,17 @@
 [
   {
-    "version": "1.1.7",
-    "releasedAt": "2026-08-21",
-    "headline": "Community-powered emulator matching gets smarter.",
+    "version": "0.1.0",
+    "releasedAt": "2026-08-22",
+    "headline": "LudusAtlas establishes its Windows-first foundation.",
     "highlights": [
-      "You can now share emulator game matches for review, helping PlayCounter recognize the same games for everyone.",
+      "Introduced the LudusAtlas desktop identity, gamepad-and-compass icon, and Windows installer boundary.",
+      "Preserved PlayCounter tracking and Community compatibility while disabling inherited publishing and update feeds.",
+      "Added automated safeguards so future upstream merges cannot silently restore mobile assets or PlayCounter release settings.",
+      "Integrated PlayCounter v1.1.7 emulator matching improvements under the LudusAtlas interface.",
       "Track the status of your emulator suggestions through notifications and unlock new contribution achievements when they are approved.",
       "A new emulator guide, better game suggestions, and a refreshed Now Emulating screen make emulator tracking easier to set up and use.",
       "History sessions are easier and safer to manage with keyboard navigation and a confirmation step before deletion.",
       "Fixed an issue that prevented playtime from being edited for custom games."
-    ]
-  },
-  {
-    "version": "1.1.5",
-    "releasedAt": "2026-08-20",
-    "headline": "Guided tours make PlayCounter easier to learn.",
-    "highlights": [
-      "New guided tours walk you through the main screens and common tasks. Step through them with the arrow keys.",
-      "The emulator game picker now stays open until you finish choosing.",
-      "Now Playing cards no longer jump out of order when a game starts or stops.",
-      "Restoring a backup is quieter and more reliable when you move your data to another PC."
     ]
   }
 ]

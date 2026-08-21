@@ -1,11 +1,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const files = {
+  rootPackage: "package.json",
   desktopPackage: "apps/desktop/package.json",
   tauriConfig: "apps/desktop/src-tauri/tauri.conf.json",
   cargoManifest: "apps/desktop/src-tauri/Cargo.toml",
   cargoLock: "apps/desktop/src-tauri/Cargo.lock",
 };
+const desktopCargoPackage = "ludusatlas";
 
 const tauriConfig = await readJson(files.tauriConfig);
 const requestedVersion = process.argv[2];
@@ -25,6 +27,7 @@ if (requestedVersion) {
 }
 
 await syncDesktopPackage(version);
+await syncRootPackage(version);
 await syncCargoManifest(version);
 await syncCargoLock(version);
 
@@ -38,6 +41,12 @@ async function syncDesktopPackage(version) {
   const desktopPackage = await readJson(files.desktopPackage);
   desktopPackage.version = version;
   await writeJson(files.desktopPackage, desktopPackage);
+}
+
+async function syncRootPackage(version) {
+  const rootPackage = await readJson(files.rootPackage);
+  rootPackage.version = version;
+  await writeJson(files.rootPackage, rootPackage);
 }
 
 async function syncCargoManifest(version) {
@@ -63,16 +72,20 @@ async function syncCargoLock(version) {
   }
 
   const updated = cargoLock.replace(
-    /(\[\[package\]\]\r?\nname = "playcounter"\r?\nversion = ")[^"]+(")/,
+    new RegExp(
+      `(\\[\\[package\\]\\]\\r?\\nname = "${desktopCargoPackage}"\\r?\\nversion = ")[^"]+(")`,
+    ),
     `$1${version}$2`,
   );
 
   if (
-    !/\[\[package\]\]\r?\nname = "playcounter"\r?\nversion = "[^"]+"/.test(
-      cargoLock,
-    )
+    !new RegExp(
+      `\\[\\[package\\]\\]\\r?\\nname = "${desktopCargoPackage}"\\r?\\nversion = "[^"]+"`,
+    ).test(cargoLock)
   ) {
-    throw new Error(`Could not find playcounter package in ${files.cargoLock}`);
+    throw new Error(
+      `Could not find ${desktopCargoPackage} package in ${files.cargoLock}`,
+    );
   }
 
   await writeFile(files.cargoLock, updated);

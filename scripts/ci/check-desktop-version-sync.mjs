@@ -2,19 +2,23 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const files = {
+  rootPackage: "package.json",
   desktopPackage: "apps/desktop/package.json",
   tauriConfig: "apps/desktop/src-tauri/tauri.conf.json",
   cargoManifest: "apps/desktop/src-tauri/Cargo.toml",
 };
 
-const [desktopPackage, tauriConfig, cargoManifest] = await Promise.all([
-  readJson(files.desktopPackage),
-  readJson(files.tauriConfig),
-  readFile(files.cargoManifest, "utf8"),
-]);
+const [rootPackage, desktopPackage, tauriConfig, cargoManifest] =
+  await Promise.all([
+    readJson(files.rootPackage),
+    readJson(files.desktopPackage),
+    readJson(files.tauriConfig),
+    readFile(files.cargoManifest, "utf8"),
+  ]);
 
 const cargoVersion = cargoManifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 const versions = new Map([
+  [files.rootPackage, rootPackage.version],
   [files.desktopPackage, desktopPackage.version],
   [files.tauriConfig, tauriConfig.version],
   [files.cargoManifest, cargoVersion],

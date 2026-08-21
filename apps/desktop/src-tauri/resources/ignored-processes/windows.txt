@@ -1,4 +1,4 @@
-# PlayCounter built-in ignored processes for Windows.
+# LudusAtlas built-in ignored processes for Windows.
 # One executable name per line. Lines starting with # are ignored.
 
 1password-browsersupport.exe
@@ -63,6 +63,7 @@ officeclicktorun.exe
 openconsole.exe
 ossdbtoolsservice_main.exe
 playcounter.exe
+ludusatlas.exe
 powershell.exe
 pwsh.exe
 quantumosc.exe
@@ -287,6 +288,7 @@ onedrivesetup.exe
 onedrivestandaloneupdater.exe
 pingsender.exe
 playcounter*-setup.exe
+ludusatlas*-setup.exe
 plugin-container.exe
 powershell-*-win-x64.exe
 python-*-amd64.exe

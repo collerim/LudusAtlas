@@ -598,7 +598,7 @@ function AmbiguousMatchCard({
         results.length > 0
           ? body.hasMore
             ? `${results.length} matches shown. Load more to keep looking.`
-            : `All ${results.length} matches shown. Select the game you launched. PlayCounter will track it as a custom game while the community match is reviewed.`
+            : `All ${results.length} matches shown. Select the game you launched. LudusAtlas will track it as a custom game while the PlayCounter Community match is reviewed.`
           : "No matching games found.",
       );
       setSearchState("idle");
@@ -746,8 +746,8 @@ function AmbiguousMatchCard({
               Is <span className="font-mono">{exeName}</span> a game?
             </h2>
             <p className="mt-2 max-w-2xl text-sm text-text-muted">
-              Other players reported that {exeName} is not a game, so
-              PlayCounter no longer matches it automatically
+              Other players reported that {exeName} is not a game, so LudusAtlas
+              no longer matches it automatically
               {candidates.length === 1
                 ? ` - even though it still matches ${candidates[0].name}`
                 : candidates.length > 1
@@ -786,12 +786,12 @@ function AmbiguousMatchCard({
               Is <span className="font-mono">{exeName}</span> a game?
             </h2>
             <p className="mt-2 max-w-2xl text-sm text-text-muted">
-              PlayCounter found this app running.{" "}
+              LudusAtlas found this app running.{" "}
               {candidates.length === 1
                 ? "A game in the database uses"
                 : `${candidates.length} games in the database use`}{" "}
               the same file name, and other apps might use it too - so
-              PlayCounter won&apos;t guess. Tell it once and it will remember.
+              LudusAtlas won&apos;t guess. Tell it once and it will remember.
             </p>
             <MatchMeta
               exeName={exeName}
@@ -799,7 +799,7 @@ function AmbiguousMatchCard({
               elapsedSeconds={elapsedSeconds}
               note={
                 flagReason === "ambiguous"
-                  ? "Several games use this file name, so PlayCounter won't guess."
+                  ? "Several games use this file name, so LudusAtlas won't guess."
                   : undefined
               }
             />
@@ -948,7 +948,7 @@ function notifyNegativeReportOutcome(
     addToast({
       tone: "error",
       title: `Could not ignore ${exeName}`,
-      detail: "PlayCounter could not ignore it on this PC. Try again.",
+      detail: "LudusAtlas could not ignore it on this PC. Try again.",
     });
     return;
   }
@@ -957,7 +957,7 @@ function notifyNegativeReportOutcome(
       tone: "error",
       title: `${exeName} ignored`,
       detail:
-        "It comes back when you restart PlayCounter - the ignore file could not be saved.",
+        "It comes back when you restart LudusAtlas - the ignore file could not be saved.",
     });
     return;
   }
@@ -988,7 +988,7 @@ function notifyDismissOutcome(
     addToast({
       tone: "error",
       title: `Could not ignore ${exeName}`,
-      detail: "PlayCounter could not ignore it on this PC. Try again.",
+      detail: "LudusAtlas could not ignore it on this PC. Try again.",
     });
     return;
   }
@@ -997,7 +997,7 @@ function notifyDismissOutcome(
     title: `${exeName} ignored`,
     detail: outcome.ignoreFileUpdated
       ? "Only on this PC. Nothing was reported."
-      : "It comes back when you restart PlayCounter - the ignore file could not be saved.",
+      : "It comes back when you restart LudusAtlas - the ignore file could not be saved.",
   });
 }
 

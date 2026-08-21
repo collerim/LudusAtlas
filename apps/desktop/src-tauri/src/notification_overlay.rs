@@ -124,7 +124,7 @@ mod imp {
             OVERLAY_LABEL,
             tauri::WebviewUrl::App("overlay.html".into()),
         )
-        .title("PlayCounter notification")
+        .title("LudusAtlas notification")
         .inner_size(CARD_LOGICAL_WIDTH, CARD_LOGICAL_HEIGHT)
         .decorations(false)
         .resizable(false)

@@ -136,10 +136,10 @@ export function WelcomePrompt() {
           <CircleHelp size={23} />
         </div>
         <h2 className="text-xl font-semibold text-text">
-          Welcome to PlayCounter
+          Welcome to LudusAtlas
         </h2>
         <p className="mt-2 leading-6 text-text-muted">
-          PlayCounter watches for games you launch and tracks how long you play,
+          LudusAtlas watches for games you launch and tracks how long you play,
           no matter where they came from. A quick tour shows you around.
         </p>
         <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-bg p-4 transition hover:border-accent/40">
@@ -151,7 +151,7 @@ export function WelcomePrompt() {
           />
           <span>
             <span className="block font-semibold text-text">
-              Help improve PlayCounter
+              Help the PlayCounter Community
             </span>
             <span className="mt-1 block text-sm leading-5 text-text-muted">
               When you ignore an unrecognized process, share its executable
@@ -586,7 +586,7 @@ function TourRunner() {
               className="w-full"
               onClick={continueWithPersonalization}
             >
-              Personalize PlayCounter (1 min)
+              Personalize LudusAtlas (1 min)
             </Button>
             <div className="flex items-center justify-between gap-2">
               <Button onClick={back}>Back</Button>

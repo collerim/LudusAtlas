@@ -25,11 +25,11 @@ export function ReportWrongMatchDialog({
         <p className="mt-2 text-sm text-text-muted">
           {gameName ? (
             <>
-              PlayCounter is tracking it as <strong>{gameName}</strong> - what's
+              LudusAtlas is tracking it as <strong>{gameName}</strong> - what's
               wrong?
             </>
           ) : (
-            <>PlayCounter matched it to a game - is that wrong?</>
+            <>LudusAtlas matched it to a game - is that wrong?</>
           )}
         </p>
         <div className="mt-5 grid gap-3">
@@ -50,8 +50,8 @@ export function ReportWrongMatchDialog({
           >
             <span>It isn&apos;t a game at all</span>
             <span className="text-xs font-normal text-text-muted">
-              A tool, launcher, or background app. PlayCounter stops tracking
-              it, ignores {label} on this PC, and reports it anonymously.
+              A tool, launcher, or background app. LudusAtlas stops tracking it,
+              ignores {label} on this PC, and reports it anonymously.
             </span>
           </Button>
           <Button variant="ghost" onClick={onCancel}>

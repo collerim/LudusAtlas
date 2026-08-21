@@ -1,108 +1,129 @@
-# PlayCounter
+# LudusAtlas
 
-**Automatic playtime tracking for Windows, regardless of launcher.**
+**A personal game atlas built on PlayCounter's activity-tracking core.**
 
-[![Latest release](https://img.shields.io/github/v/release/zntr1/PlayCounter?label=download&sort=semver)](https://github.com/zntr1/PlayCounter/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/t2nG3jaEEY)
+LudusAtlas is a long-term, cross-platform desktop product for automatic game
+activity tracking, a durable personal library and history, platform
+achievements, completion analytics, and explainable recommendations through
+Compass. Windows is the first production target. The architecture is kept
+compatible with a future macOS build from the same Tauri, React, TypeScript,
+and Rust codebase. LudusAtlas does not target iOS or Android; no mobile app is
+planned or maintained.
 
-PlayCounter watches what's actually running on your PC and records playtime for
-recognized games, regardless of how they were launched (Steam, Epic, GOG, EA,
-Ubisoft, Battle.net, a shortcut, or a plain `.exe`). Unknown games can be added
-locally or submitted as community matches for review. Sessions and recent
-history stay on the PC, and the free, open-source app does not require an
-account.
+The project is in active fork development. The current foundation preserves
+PlayCounter tracking and Community compatibility; the LudusAtlas SQLite,
+Steam, platform-achievement, canonical-identity, and Compass phases are not yet
+complete.
 
-Different AI models supported me in developing this application.
+## Relationship to PlayCounter
 
-## Download
+LudusAtlas is based on the open-source
+[PlayCounter](https://github.com/zntr1/PlayCounter) project by zntr1 and keeps
+its Git history. PlayCounter remains the upstream project and provides the
+process scanners, activity/session tracking, emulator detection, local
+compatibility state, and Community process-identification flow.
 
-**[Download the latest release for Windows →](https://github.com/zntr1/PlayCounter/releases/latest)**
+LudusAtlas is an independent fork. It is not an official PlayCounter release
+and is not affiliated with or endorsed by PlayCounter's maintainers. The MIT
+license and upstream attribution are preserved in [LICENSE](./LICENSE) and
+[docs/UPSTREAM.md](./docs/UPSTREAM.md).
 
-Every release ships the Windows installer together with its **SHA-256 checksum**
-and an independent **VirusTotal scan**, so you can verify your download before you
-install. macOS and Linux are planned.
+## Current foundation
 
-## Screenshots
+- Automatic process-based activity tracking on Windows
+- Existing macOS and Linux scanner abstractions retained as upstream internals;
+  they are not current release targets
+- PlayCounter Community matching, manual correction, contribution, and status
+  polling retained without a protocol fork
+- Existing local session history, emulator support, milestones, and
+  PlayCounter-compatible JSON backup handling retained
+- A separate application identifier (`app.ludusatlas.desktop`) so LudusAtlas
+  and PlayCounter use different application-data locations
+- Safe PlayCounter backup import: durable data transfers, but the PlayCounter
+  install/contribution UUID is not cloned into LudusAtlas
+- Automatic and manual application updates disabled until LudusAtlas has its
+  own separately signed release feed
 
-![PlayCounter recording Cyberpunk 2077](docs/screenshots/now-playing.png)
+## Steam status
 
-|                               Game library                                |                                   Session history                                   |
-| :-----------------------------------------------------------------------: | :---------------------------------------------------------------------------------: |
-| ![PlayCounter library with game cover art](docs/screenshots/my-games.png) | ![PlayCounter session history with game cover art](docs/screenshots/my-history.png) |
+Steam is the planned first native library and achievement provider. The future
+setup will require a SteamID64 and a Steam Web API key, with the API key stored
+in OS-backed secure credential storage. No real Steam credential should be
+placed in source code, Git, localStorage, plaintext SQLite, logs, fixtures, or
+chat.
 
-## Why it's open source
+Steam synchronization and platform achievements are not implemented in the
+current foundation phase.
 
-PlayCounter watches your running processes to know when a game starts and stops.
-That only works if you trust it. So the entire client **and** the server it talks
-to are open: you can read exactly what is collected, what leaves your machine, and
-what does not. Nothing is hidden.
+## Privacy and local data
 
-## Privacy
+- Activity tracking and play history remain local to the device.
+- Community matching sends only the process identifiers required by the
+  existing PlayCounter protocol. On Windows this is the executable filename,
+  never its full path.
+- Community contributions and feedback are sent only through the existing user
+  actions and preferences.
+- A random LudusAtlas install UUID is used as an anonymous idempotency key; a
+  PlayCounter UUID is not copied during migration.
+- Secrets are excluded from the existing backup format and from the planned
+  LudusAtlas durable-data backup design.
 
-- Play tracking happens **locally** on your machine - your history stays there.
-- Automatic game matching sends the required process identifier to the API. On
-  Windows this is the executable filename, never its full path.
-- Feedback and community game submissions are only sent when you choose those
-  actions. No PlayCounter account is required.
-- A blacklist lets you exclude any executable from tracking.
-
-## Features
-
-- Detects recognized games by watching running processes, with no per-launcher
-  setup and no requirement to launch through PlayCounter
-- Track anything you choose, not just games (any process on your PC)
-- Automatic executable-to-game matching against the API
-- Local play-session tracking with recent history and manual session entry
-- Current / "now playing" view with a system-tray indicator
-- Community suggestions and one-time local choices for unknown or ambiguous exes
-- Configurable polling and unmatched-retry intervals plus an executable blacklist
-- Built-in auto-updater
+See [docs/DATA.md](./docs/DATA.md) for current ownership boundaries and
+[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the phased architecture.
 
 ## Project structure
 
-This is a pnpm + Turborepo monorepo:
+| Path                | Description                                               |
+| ------------------- | --------------------------------------------------------- |
+| `apps/desktop`      | Tauri 2 + React 19 + TypeScript desktop application       |
+| `apps/api`          | Upstream-compatible Fastify Community/matching API        |
+| `packages/shared`   | Shared PlayCounter API and model contracts                |
+| `scripts/igdb-seed` | Upstream IGDB identifier seeding tools                    |
+| `landing`           | Guarded PlayCounter archive; never deployed by LudusAtlas |
 
-| Path                | Description                                                                     |
-| ------------------- | ------------------------------------------------------------------------------- |
-| `apps/desktop`      | Tauri 2 + React 19 + TypeScript desktop app (Rust process scanner)              |
-| `apps/api`          | Fastify API: executable matching, community suggestions, metadata, and feedback |
-| `packages/shared`   | Shared TypeScript API and model contracts                                       |
-| `scripts/igdb-seed` | IGDB-based game/executable seeding scripts                                      |
-| `landing`           | Marketing landing page                                                          |
+## Development
 
-## Getting started
-
-Requires [Node.js](https://nodejs.org/), [pnpm](https://pnpm.io/) (via Corepack),
-and the [Rust toolchain](https://www.rust-lang.org/tools/install) plus the
-[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
+Requirements: Node.js 22, pnpm 9.15.4 through Corepack, the Rust toolchain, and
+the Tauri prerequisites for Windows.
 
 ```bash
 corepack enable
-pnpm install
-```
-
-Run the desktop app in dev mode:
-
-```bash
+pnpm install --frozen-lockfile
+pnpm check:fork-boundaries
+pnpm turbo run test typecheck build
 pnpm desktop:dev
 ```
 
-Run the API in dev mode:
+## Windows preview and release builds
 
-```bash
-pnpm api:dev
-```
+LudusAtlas release automation is self-contained in this repository and never
+deploys the inherited API, PlayCounter Azure resources, or the archived landing
+site.
 
-Build the desktop app:
+- **Preview:** run `Build LudusAtlas Windows preview` from GitHub Actions. It
+  builds an NSIS installer and stores it as a 14-day workflow artifact.
+- **Release:** synchronize the desktop version with
+  `pnpm desktop:version <version>`, commit it, then push the matching tag (for
+  example `v0.1.0`). `Release LudusAtlas for Windows` validates the tag, builds
+  the installer, creates a checksum, and publishes a GitHub release. Versions
+  below 1.0 and versions with prerelease suffixes are marked as prereleases;
+  stable 1.x versions are published as normal releases.
+- The release workflow can also be started manually with the configured version
+  as its input.
 
-```bash
-pnpm desktop:build
-```
+Development installers are currently unsigned and Windows may show an
+unknown-publisher or SmartScreen warning. Application self-update remains
+disabled until LudusAtlas has its own Authenticode certificate and separately
+signed updater feed.
 
-> The API uses an in-memory sample catalog unless `DATABASE_URL` (Postgres) is set.
-> Copy `apps/.env.example` to `apps/.env` for environment configuration.
+## Documentation
+
+- [Architecture](./docs/ARCHITECTURE.md)
+- [Data ownership and migration](./docs/DATA.md)
+- [Upstream synchronization](./docs/UPSTREAM.md)
+- [Foundation baseline](./docs/BASELINE.md)
 
 ## License
 
-[MIT](./LICENSE) © zntr1
+MIT. See [LICENSE](./LICENSE). LudusAtlas includes and modifies work from
+PlayCounter, Copyright (c) zntr1, used under the MIT License.

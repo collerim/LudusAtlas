@@ -53,8 +53,8 @@ export function EmulatorPickerCard({
               {observation.label} is running
             </h2>
             <p className="mt-1 text-sm text-text-muted">
-              PlayCounter cannot tell which game is loaded. Start a game in the
-              emulator - it shows up here as soon as PlayCounter recognizes it.
+              LudusAtlas cannot tell which game is loaded. Start a game in the
+              emulator or launch one with a supported file or title.
             </p>
             <Button
               className="mt-3"
@@ -196,7 +196,7 @@ export function EmulatorPickerCard({
             offline
               ? "Sharing needs an internet connection."
               : !installUuid
-                ? "PlayCounter is still starting up."
+                ? "LudusAtlas is still starting up."
                 : undefined
           }
           onSelectCustom={(name) => void applyCustom(name)}
@@ -209,7 +209,7 @@ export function EmulatorPickerCard({
         <Button
           variant="ghost"
           disabled={busy}
-          title="PlayCounter stops tracking this game. You can restore it under Ignored games."
+          title="LudusAtlas stops tracking this game. You can restore it under Ignored games."
           onClick={() => {
             void ignoreEmulatorContent(observation.key).then(() =>
               addToast({

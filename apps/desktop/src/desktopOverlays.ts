@@ -144,7 +144,7 @@ function overlayCopy(
     return event.exeCount === 1
       ? {
           kicker: "NEW APP FOUND",
-          title: "PlayCounter doesn't know this one",
+          title: "LudusAtlas doesn't know this one",
           body: "Open Discovered to sort it out.",
         }
       : {

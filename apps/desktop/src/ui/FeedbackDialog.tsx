@@ -27,7 +27,7 @@ const feedbackTypes: Array<{
     id: "feature",
     label: "Feature",
     icon: Lightbulb,
-    placeholder: "What would you like PlayCounter to do?",
+    placeholder: "What would you like LudusAtlas to do?",
   },
   {
     id: "other",
@@ -101,7 +101,7 @@ export function FeedbackDialog({ onClose }: { onClose: () => void }) {
       addToast({
         tone: "success",
         title: "Thanks for the feedback",
-        detail: "Your message was sent to the PlayCounter team.",
+        detail: "Your message was sent to the configured feedback service.",
       });
       onClose();
     } catch (caught) {

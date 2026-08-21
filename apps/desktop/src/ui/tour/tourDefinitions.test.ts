@@ -76,7 +76,7 @@ describe("tour definitions", () => {
     expect(
       guide.steps.find((step) => step.id === "settings")?.scrollIntoView,
     ).toBe(true);
-    expect(menu.body).toContain("first time PlayCounter sees");
+    expect(menu.body).toContain("first time LudusAtlas sees");
     expect(menu.body).toContain("Now Emulating works differently");
     expect(
       guide.steps.find((step) => step.id === "emulator-page")?.body,

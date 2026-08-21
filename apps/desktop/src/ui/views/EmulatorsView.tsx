@@ -195,7 +195,7 @@ function EmulatorView({
         <div className="border-b border-border px-5 py-4">
           <h2 className="font-semibold text-text">Your linked games</h2>
           <p className="mt-1 text-sm text-text-muted">
-            {label} games PlayCounter remembers and recognizes automatically.
+            {label} games LudusAtlas remembers and recognizes automatically.
           </p>
         </div>
         {displayedGameMappings.length === 0 ? (
@@ -207,8 +207,8 @@ function EmulatorView({
               No recognized {label} games yet
             </div>
             <div>
-              Start a game in {label} and pick it once. PlayCounter recognizes
-              it automatically from then on.
+              Start a game in {label} and pick it once. LudusAtlas recognizes it
+              automatically from then on.
             </div>
           </div>
         ) : (
@@ -238,7 +238,7 @@ function EmulatorView({
           <div className="border-b border-border px-5 py-4">
             <h2 className="font-semibold text-text">Ignored {label} games</h2>
             <p className="mt-1 text-sm text-text-muted">
-              Restore a game to let PlayCounter detect it again.
+              Restore a game to let LudusAtlas detect it again.
             </p>
           </div>
           <div className="divide-y divide-border">
@@ -297,7 +297,7 @@ function EmulatorView({
                     .then(() => {
                       addToast({
                         tone: "info",
-                        title: `PlayCounter will ask about ${item.display} again`,
+                        title: `LudusAtlas will ask about ${item.display} again`,
                         detail: "Recorded playtime stays in History.",
                       });
                       setForgetting(null);
@@ -321,7 +321,7 @@ function EmulatorView({
           }
         >
           <p className="text-sm leading-6 text-text-muted">
-            PlayCounter asks you again the next time it shows up - right away if
+            LudusAtlas asks you again the next time it shows up - right away if
             the emulator is running. Recorded playtime stays in History.
           </p>
         </Modal>
@@ -460,7 +460,7 @@ function LinkedGameRow({
         </div>
         {mapping.needsConfirmation ? (
           <p className="mt-2 text-xs text-text-faint">
-            PlayCounter already tracks this game. Confirm to remove this note.
+            LudusAtlas already tracks this game. Confirm to remove this note.
           </p>
         ) : null}
       </div>

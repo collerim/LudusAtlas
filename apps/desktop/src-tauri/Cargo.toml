@@ -1,12 +1,12 @@
 [package]
-name = "playcounter"
-version = "1.1.7"
-description = "Launcher-agnostic game play tracker"
-authors = ["PlayCounter"]
+name = "ludusatlas"
+version = "0.1.0"
+description = "Personal game atlas built on the PlayCounter tracking core"
+authors = ["LudusAtlas contributors"]
 edition = "2021"
 
 [lib]
-name = "playcounter_lib"
+name = "ludusatlas_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -24,7 +24,6 @@ tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-process = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
-tauri-plugin-updater = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 systemicons = "0.9.13"

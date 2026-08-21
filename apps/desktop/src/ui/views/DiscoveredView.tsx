@@ -144,7 +144,7 @@ const statusLabels: Record<DiscoveryStatus, string> = {
   matched: "Tracked game",
   custom: "Added manually",
   unmatched: "Not recognized",
-  ignored: "Ignored by PlayCounter",
+  ignored: "Ignored by LudusAtlas",
   userIgnored: "Ignored by you",
 };
 
@@ -643,7 +643,7 @@ export function DiscoveredView() {
         id: "saved",
         title: "Not running",
         description:
-          "Apps PlayCounter saw earlier. They stay here until you decide.",
+          "Apps LudusAtlas saw earlier. They stay here until you decide.",
         executables: saved.sort(sortDiscovered),
       },
     ];
@@ -1105,7 +1105,7 @@ function notifyIgnoredProcessSuggestionOutcome(
     addToast({
       tone: "error",
       title: `Could not ignore ${exeName}`,
-      detail: "PlayCounter could not ignore it on this PC. Try again.",
+      detail: "LudusAtlas could not ignore it on this PC. Try again.",
     });
     return;
   }
@@ -1114,7 +1114,7 @@ function notifyIgnoredProcessSuggestionOutcome(
       tone: "error",
       title: `${exeName} ignored`,
       detail:
-        "It comes back when you restart PlayCounter - the ignore file could not be saved.",
+        "It comes back when you restart LudusAtlas - the ignore file could not be saved.",
     });
     return;
   }

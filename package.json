@@ -1,21 +1,22 @@
 {
-  "name": "playcounter",
+  "name": "ludusatlas",
   "version": "0.1.0",
   "private": true,
-  "description": "Gametime tracker. Detects running games from any sources and tracks your play sessions locally.",
+  "description": "Windows-first personal game library, activity tracker, achievements hub, and completion compass.",
   "license": "MIT",
-  "author": "zntr1",
-  "homepage": "https://playcounter.app",
+  "author": "LudusAtlas contributors; based on PlayCounter by zntr1",
+  "homepage": "https://github.com/collerim/LudusAtlas",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zntr1/PlayCounter.git"
+    "url": "https://github.com/collerim/LudusAtlas.git"
   },
   "bugs": {
-    "url": "https://github.com/zntr1/PlayCounter/issues"
+    "url": "https://github.com/collerim/LudusAtlas/issues"
   },
   "packageManager": "pnpm@9.15.4",
   "scripts": {
     "dev": "turbo dev",
+    "check:fork-boundaries": "node scripts/ci/check-fork-boundaries.mjs",
     "api:dev": "corepack pnpm --filter @playcounter/api dev",
     "db:migrate": "corepack pnpm --filter @playcounter/api db:migrate",
     "db:seed": "corepack pnpm --filter @playcounter/igdb-seed dev",

@@ -2,7 +2,6 @@ import {
   BarChart3,
   Bug,
   Cpu,
-  Download,
   Gamepad2,
   Globe,
   ListChecks,
@@ -56,16 +55,8 @@ import {
   type ViewId,
 } from "../store";
 import {
-  checkForUpdate,
-  installAvailableUpdate,
-  type InstallProgress,
-  type UpdateCheckResult,
-} from "../updater";
-import {
   decideReleaseNotesDisplay,
   findUnseenReleaseNotes,
-  isEmptyDisplayNotes,
-  parseManifestNotes,
   toDisplayNotes,
 } from "../releaseNotes";
 
@@ -107,7 +98,7 @@ const views: Record<
   },
   games: {
     label: "My Games",
-    subtitle: "Every game PlayCounter has tracked for you",
+    subtitle: "Every game LudusAtlas has tracked for you",
     icon: Gamepad2,
     component: <MyGamesView />,
   },
@@ -131,7 +122,7 @@ const views: Record<
   },
   settings: {
     label: "Settings",
-    subtitle: "Configure how PlayCounter runs",
+    subtitle: "Configure how LudusAtlas runs",
     icon: Settings,
     component: <SettingsView />,
   },
@@ -149,7 +140,7 @@ const sidebarSections: Array<{ label: string; items: ViewId[] }> = [
   { label: "System", items: ["discovered", "settings", "dev"] },
 ];
 
-const WEBSITE_URL = "https://playcounter.app/";
+const WEBSITE_URL = "https://github.com/collerim/LudusAtlas";
 const DISCORD_URL = "https://discord.gg/t2nG3jaEEY";
 const STORAGE_KEY = "playcounter:v1";
 
@@ -158,13 +149,6 @@ let startupPreferenceSynced = false;
 export function App() {
   const contentRef = useRef<HTMLDivElement>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  const [startupUpdate, setStartupUpdate] = useState<UpdateCheckResult | null>(
-    null,
-  );
-  const [installProgress, setInstallProgress] =
-    useState<InstallProgress | null>(null);
-  const [installingUpdate, setInstallingUpdate] = useState(false);
-  const [startupNotesOpen, setStartupNotesOpen] = useState(false);
   const [devToolsEnabled, setDevToolsEnabled] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const activeView = useAppStore((state) => state.activeView);
@@ -260,16 +244,6 @@ export function App() {
     void getVersion()
       .then(setAppVersion)
       .catch(() => setAppVersion(null));
-
-    const updateCheckTimer = window.setTimeout(() => {
-      void checkForUpdate()
-        .then((result) => {
-          if (result.status === "available") setStartupUpdate(result);
-        })
-        .catch(() => undefined);
-    }, 8_000);
-
-    return () => window.clearTimeout(updateCheckTimer);
   }, []);
 
   useEffect(() => {
@@ -315,31 +289,10 @@ export function App() {
     tourProgress,
   ]);
 
-  async function handleInstallStartupUpdate() {
-    setStartupNotesOpen(false);
-    setInstallingUpdate(true);
-    setInstallProgress(null);
-
-    try {
-      const installed = await installAvailableUpdate(setInstallProgress);
-      if (!installed) {
-        setStartupUpdate(null);
-        setInstallingUpdate(false);
-      }
-    } catch {
-      setInstallingUpdate(false);
-    }
-  }
-
-  const startupDisplayNotes =
-    startupUpdate?.status === "available"
-      ? parseManifestNotes(startupUpdate.notes)
-      : parseManifestNotes(null);
   const installedReleaseNotes = findUnseenReleaseNotes(
     appVersion,
     lastSeenReleaseNotesVersion,
   );
-
   async function openExternalUrl(url: string, label: string) {
     try {
       if (isOffline) {
@@ -374,7 +327,7 @@ export function App() {
           />
           <div className="min-w-0">
             <div className="truncate text-xl font-bold tracking-tight text-text">
-              PlayCounter
+              LudusAtlas
             </div>
           </div>
         </div>
@@ -503,22 +456,22 @@ export function App() {
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
             />
             <IconButton
-              aria-label="Open PlayCounter website"
+              aria-label="Open LudusAtlas project page"
               title={
                 isOffline
                   ? "Website unavailable offline"
-                  : "Open PlayCounter website"
+                  : "Open LudusAtlas project page"
               }
               disabled={isOffline}
               icon={Globe}
               onClick={() => void openExternalUrl(WEBSITE_URL, "website")}
             />
             <IconButton
-              aria-label="Open PlayCounter Discord"
+              aria-label="Open PlayCounter Community Discord"
               title={
                 isOffline
                   ? "Discord unavailable offline"
-                  : "Open PlayCounter Discord"
+                  : "Open PlayCounter Community Discord"
               }
               disabled={isOffline}
               onClick={() => void openExternalUrl(DISCORD_URL, "Discord")}
@@ -541,36 +494,6 @@ export function App() {
             {runtimeError}
           </div>
         ) : null}
-        {startupUpdate?.status === "available" ? (
-          <div className="flex items-center justify-between gap-4 border-b border-info-border bg-info-tint px-7 py-2 text-sm text-info">
-            <span className="min-w-0">
-              Version {startupUpdate.version} is available
-              {installingUpdate
-                ? ` - ${formatInstallProgress(installProgress)}`
-                : ""}
-            </span>
-            <div className="flex shrink-0 items-center gap-2">
-              {!isEmptyDisplayNotes(startupDisplayNotes) ? (
-                <Button
-                  variant="secondary"
-                  onClick={() => setStartupNotesOpen(true)}
-                  className="px-3 py-1.5"
-                >
-                  What's new
-                </Button>
-              ) : null}
-              <Button
-                variant="primary"
-                icon={Download}
-                loading={installingUpdate}
-                onClick={() => void handleInstallStartupUpdate()}
-                className="px-3 py-1.5"
-              >
-                {installingUpdate ? "Installing…" : "Install"}
-              </Button>
-            </div>
-          </div>
-        ) : null}
         <div className="relative min-h-0 flex-1">
           <div
             ref={contentRef}
@@ -589,7 +512,7 @@ export function App() {
       {currentNotesOpen && appVersion && installedReleaseNotes.length > 0 ? (
         <ReleaseNotesDialog
           version={appVersion}
-          eyebrow="New update"
+          eyebrow="What's new"
           sections={installedReleaseNotes.map((note) => ({
             version: note.version,
             notes: toDisplayNotes(note),
@@ -603,32 +526,6 @@ export function App() {
                 onClick={() => closeCurrentReleaseNotes(appVersion)}
               >
                 Got it
-              </Button>
-            </div>
-          }
-        />
-      ) : null}
-      {startupNotesOpen && startupUpdate?.status === "available" ? (
-        <ReleaseNotesDialog
-          version={startupUpdate.version}
-          eyebrow="Update available"
-          sections={[
-            {
-              version: startupUpdate.version,
-              notes: startupDisplayNotes,
-            },
-          ]}
-          onClose={() => setStartupNotesOpen(false)}
-          footer={
-            <div className="flex justify-end">
-              <Button
-                variant="primary"
-                icon={Download}
-                loading={installingUpdate}
-                data-autofocus
-                onClick={() => void handleInstallStartupUpdate()}
-              >
-                {installingUpdate ? "Installing…" : "Install update"}
               </Button>
             </div>
           }
@@ -862,20 +759,6 @@ function stageBadge(stage: Stage) {
     case "prod":
       return { label: "Prod", className: "font-medium text-danger" };
   }
-}
-
-function formatInstallProgress(progress: InstallProgress | null) {
-  if (!progress) return "preparing update";
-
-  const downloaded = formatBytes(progress.downloadedBytes);
-  if (!progress.totalBytes) return `downloading ${downloaded}`;
-
-  return `downloading ${downloaded} of ${formatBytes(progress.totalBytes)}`;
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function formatError(error: unknown) {

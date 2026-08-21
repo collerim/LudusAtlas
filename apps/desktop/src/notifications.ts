@@ -167,7 +167,7 @@ export function contributionNotification(
         id: `suggestion-verified:${key}`,
         kind: "suggestion-verified",
         title: `${contribution.gameName} suggestion approved`,
-        body: `Suggested file: ${contribution.value}\n\nThanks for helping PlayCounter recognize it.`,
+        body: `Suggested file: ${contribution.value}\n\nThanks for helping the PlayCounter Community recognize it.`,
         coverUrl: contribution.coverUrl,
         createdAt: contribution.reviewedAt ?? now,
       }
@@ -212,7 +212,7 @@ export function emulatorContributionNotification(
         id: `suggestion-verified:${key}`,
         kind: "suggestion-verified",
         title: `${contribution.gameName} suggestion approved`,
-        body: `Detected in ${emulatorLabel}: ${contribution.contentValue}\n\nEveryone's PlayCounter recognizes it now.`,
+        body: `Detected in ${emulatorLabel}: ${contribution.contentValue}\n\nCompatible Community clients can recognize it now.`,
         coverUrl: contribution.coverUrl,
         createdAt: contribution.reviewedAt ?? now,
         action,

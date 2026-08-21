@@ -52,13 +52,15 @@ const ALL_GROUP_META: Array<{
     id: "verified",
     label: "Community contributions",
     shortLabel: "Contributions",
-    caption: "Help PlayCounter recognize more games for everyone.",
+    caption:
+      "Help the PlayCounter Community recognize more games for everyone.",
   },
   {
     id: "emulator",
     label: "Emulator contributions",
     shortLabel: "Emulators",
-    caption: "Help PlayCounter recognize the games you play in emulators.",
+    caption:
+      "Help the PlayCounter Community recognize the games you play in emulators.",
   },
   {
     id: "total",

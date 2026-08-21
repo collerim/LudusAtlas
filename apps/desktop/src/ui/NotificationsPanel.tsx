@@ -25,7 +25,7 @@ export function NotificationsPanel({ onClose }: { onClose: () => void }) {
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div>
           <h2 className="font-semibold text-text">Notifications</h2>
-          <p className="text-xs text-text-muted">Updates from PlayCounter</p>
+          <p className="text-xs text-text-muted">Updates from LudusAtlas</p>
         </div>
         <IconButton
           aria-label="Close notifications"

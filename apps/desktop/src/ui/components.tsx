@@ -64,7 +64,8 @@ const sourceBadgeLabels: Record<GameSource, string> = {
 
 const sourceBadgeTooltips: Record<GameSource, string> = {
   igdb: "IGDB has this file name on record for the game.",
-  community: "A PlayCounter user linked this file name to the game, and it was approved.",
+  community:
+    "A PlayCounter Community user linked this file name to the game, and it was approved.",
   custom: "You linked this file name to the game yourself. Stays on this PC.",
 };
 

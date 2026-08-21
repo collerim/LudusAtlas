@@ -20,7 +20,7 @@ mod session;
 
 const TRAY_STATUS_IDLE: &str = "No game active";
 const TRAY_STATUS_PREFIX: &str = "Playing ";
-const WEBSITE_URL: &str = "https://playcounter.app/";
+const WEBSITE_URL: &str = "https://github.com/collerim/LudusAtlas";
 const DISCORD_URL: &str = "https://discord.gg/t2nG3jaEEY";
 
 struct TrayState {
@@ -152,7 +152,7 @@ fn backup_local_data(app: tauri::AppHandle, contents: String) -> Result<String, 
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_secs();
-    let path = backup_dir.join(format!("playcounter-backup-{stamp}.json"));
+    let path = backup_dir.join(format!("ludusatlas-backup-{stamp}.json"));
     fs::write(&path, contents).map_err(|error| error.to_string())?;
     path_to_string(path)
 }
@@ -166,7 +166,7 @@ fn open_user_ignored_processes_folder(app: tauri::AppHandle) -> Result<(), Strin
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     let url = match url.trim() {
-        WEBSITE_URL | "https://playcounter.app" => WEBSITE_URL,
+        WEBSITE_URL | "https://github.com/collerim/LudusAtlas/" => WEBSITE_URL,
         DISCORD_URL => DISCORD_URL,
         _ => return Err("Unsupported external URL.".to_string()),
     };
@@ -217,7 +217,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -269,7 +268,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running PlayCounter");
+        .expect("error while running LudusAtlas");
 }
 
 fn launched_from_autostart() -> bool {
@@ -277,10 +276,10 @@ fn launched_from_autostart() -> bool {
 }
 
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let title_item = MenuItem::with_id(app, "tray_title", "PlayCounter", false, None::<&str>)?;
+    let title_item = MenuItem::with_id(app, "tray_title", "LudusAtlas", false, None::<&str>)?;
     let status_item = MenuItem::with_id(app, "tray_status", TRAY_STATUS_IDLE, false, None::<&str>)?;
-    let open_item = MenuItem::with_id(app, "tray_open", "Open PlayCounter", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "tray_quit", "Quit PlayCounter", true, None::<&str>)?;
+    let open_item = MenuItem::with_id(app, "tray_open", "Open LudusAtlas", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "tray_quit", "Quit LudusAtlas", true, None::<&str>)?;
     let header_separator = PredefinedMenuItem::separator(app)?;
     let action_separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(

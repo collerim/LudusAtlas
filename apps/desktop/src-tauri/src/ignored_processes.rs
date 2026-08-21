@@ -190,7 +190,7 @@ fn format_user_file(user_processes: &[String]) -> String {
 }
 
 fn default_user_file() -> &'static str {
-    "# PlayCounter user ignored processes.\n\
+    "# LudusAtlas user ignored processes.\n\
      # Add one process name or wildcard pattern per line. Lines starting with # are ignored.\n\
      # Wildcards: * matches any text, ? matches one character.\n\
      # Windows example: chrome.exe\n\

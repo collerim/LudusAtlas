@@ -15,7 +15,7 @@ export type DiscoveredReviewCardState = "absent" | "unread" | "read";
 export function discoveredReviewReminderText(count: number) {
   return {
     title: `${count} apps are waiting for review`,
-    body: "Match them to games or ignore them so PlayCounter tracks the right playtime.",
+    body: "Match them to games or ignore them so LudusAtlas tracks the right playtime.",
   };
 }
 

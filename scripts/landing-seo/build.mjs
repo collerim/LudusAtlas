@@ -1,6 +1,5 @@
-// Generates the landing-site guide pages from the content modules and rewrites
-// sitemap.xml. Plain static HTML in, plain static HTML out - the Azure Static
-// Web Apps deploy uploads /landing verbatim, so the output must be committed.
+// Archived upstream PlayCounter landing generator. LudusAtlas does not deploy
+// this site; the explicit environment guard prevents accidental regeneration.
 //
 //   node scripts/landing-seo/build.mjs
 //
@@ -10,6 +9,12 @@ import { fileURLToPath } from "node:url";
 
 import { launcherPages } from "./pages-launchers.mjs";
 import { topicPages } from "./pages-topics.mjs";
+
+if (process.env.ALLOW_ARCHIVED_PLAYCOUNTER_LANDING !== "1") {
+  throw new Error(
+    "The PlayCounter landing site is archived and is not part of LudusAtlas publishing.",
+  );
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LANDING = join(HERE, "..", "..", "landing");
@@ -156,8 +161,18 @@ const schema = (page, url, minutes) => {
       "@type": "BreadcrumbList",
       "@id": `${url}#breadcrumb`,
       itemListElement: [
-        { "@type": "ListItem", position: 1, name: "PlayCounter", item: `${SITE}/` },
-        { "@type": "ListItem", position: 2, name: "Guides", item: `${SITE}/guides/` },
+        {
+          "@type": "ListItem",
+          position: 1,
+          name: "PlayCounter",
+          item: `${SITE}/`,
+        },
+        {
+          "@type": "ListItem",
+          position: 2,
+          name: "Guides",
+          item: `${SITE}/guides/`,
+        },
         { "@type": "ListItem", position: 3, name: page.breadcrumb, item: url },
       ],
     },
@@ -172,7 +187,8 @@ const schema = (page, url, minutes) => {
       datePublished: BUILD_DATE,
       dateModified: BUILD_DATE,
       inLanguage: "en",
-      wordCount: plain(page.sections.map((s) => s.body).join(" ")).split(" ").length,
+      wordCount: plain(page.sections.map((s) => s.body).join(" ")).split(" ")
+        .length,
       timeRequired: `PT${minutes}M`,
       about: { "@id": `${SITE}/#software` },
       author: { "@type": "Organization", name: "PlayCounter", url: `${SITE}/` },
@@ -212,7 +228,11 @@ const schema = (page, url, minutes) => {
     });
   }
 
-  return JSON.stringify({ "@context": "https://schema.org", "@graph": graph }, null, 2)
+  return JSON.stringify(
+    { "@context": "https://schema.org", "@graph": graph },
+    null,
+    2,
+  )
     .split("\n")
     .map((line) => `      ${line}`)
     .join("\n");
@@ -351,7 +371,10 @@ const renderSitemap = () => {
       lastmod: p.lastmod,
     })),
     ...pages.map((p) => ({ loc: `${SITE}/${p.slug}/`, lastmod: BUILD_DATE })),
-    ...legalPages.map((p) => ({ loc: `${SITE}/${p.file}`, lastmod: p.lastmod })),
+    ...legalPages.map((p) => ({
+      loc: `${SITE}/${p.file}`,
+      lastmod: p.lastmod,
+    })),
   ];
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -376,7 +399,9 @@ for (const page of pages) {
     console.warn(`  ! title ${page.title.length} chars: ${page.slug}`);
   }
   if (page.description.length > 158) {
-    console.warn(`  ! description ${page.description.length} chars: ${page.slug}`);
+    console.warn(
+      `  ! description ${page.description.length} chars: ${page.slug}`,
+    );
   }
 
   const dir = join(LANDING, page.slug);

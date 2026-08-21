@@ -60,7 +60,7 @@ export function emulatorShareControl(
     return {
       ...base,
       disabled: true,
-      reason: "PlayCounter is still starting up.",
+      reason: "LudusAtlas is still starting up.",
     };
   }
   if (context.serverUnavailable) {

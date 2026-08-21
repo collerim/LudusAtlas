@@ -1,14 +1,7 @@
 {
-  "productName": "PlayCounter (Test)",
-  "identifier": "app.playcounter.desktop.test",
+  "productName": "LudusAtlas (Test)",
+  "identifier": "app.ludusatlas.desktop.test",
   "build": {
     "beforeBuildCommand": "corepack pnpm build:test"
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://stplaycountereuw.blob.core.windows.net/releases-test/latest.json"
-      ]
-    }
   }
 }

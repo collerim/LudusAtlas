@@ -28,6 +28,10 @@ target/
 *.sig
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+# LudusAtlas targets desktop Windows (and later macOS). Tauri's icon command
+# generates these mobile resources by default, so keep them out of the repo.
+apps/desktop/src-tauri/icons/android/
+apps/desktop/src-tauri/icons/ios/
 
 # OS
 .DS_Store
@@ -42,6 +46,7 @@ desktop.ini
 # internal
 temp_screenshots/
 docs/*
+!docs/*.md
 !docs/screenshots/
 !docs/screenshots/**
 !docs/release-notes.md

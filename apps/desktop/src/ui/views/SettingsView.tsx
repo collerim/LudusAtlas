@@ -18,43 +18,17 @@ import { emulatorAssetUrls } from "../../emulators/assets";
 import { adapterFor } from "../../emulators/registry";
 import { exportLocalData, importLocalData } from "../../backup";
 import { useAppStore, useIsOffline } from "../../store";
-import {
-  checkForUpdate,
-  installAvailableUpdate,
-  type InstallProgress,
-  type UpdateCheckResult,
-} from "../../updater";
+import { UPDATE_POLICY } from "../../updater";
 import { Panel } from "../components";
 import { Button, useEscapeKey } from "../primitives";
 import { DEFAULT_ACCENT_COLOR } from "../../theme";
 import { currentPlatform } from "../../platform";
 import { previewDesktopOverlay } from "../../desktopOverlayBridge";
 import { TutorialSettingsPanel } from "../tour/TourUI";
-import { ReleaseNotesDialog } from "../ReleaseNotesDialog";
-import {
-  findReleaseNote,
-  isEmptyDisplayNotes,
-  parseManifestNotes,
-} from "../../releaseNotes";
-
-type UpdateStatus =
-  | "idle"
-  | "checking"
-  | "available"
-  | "current"
-  | "installing"
-  | "error";
+import { findReleaseNote } from "../../releaseNotes";
 
 export function SettingsView() {
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
-  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(
-    null,
-  );
-  const [installProgress, setInstallProgress] =
-    useState<InstallProgress | null>(null);
-  const [updateError, setUpdateError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  const [updateNotesOpen, setUpdateNotesOpen] = useState(false);
   const [startupSyncing, setStartupSyncing] = useState(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [reloadingIgnored, setReloadingIgnored] = useState(false);
@@ -139,8 +113,8 @@ export function SettingsView() {
         tone: "success",
         title: ignored ? "Emulator ignored" : "Emulator enabled",
         detail: ignored
-          ? "PlayCounter will hide this emulator and stop detecting games inside it. Existing games and history are kept."
-          : "PlayCounter will detect games inside this emulator again.",
+          ? "LudusAtlas will hide this emulator and stop detecting games inside it. Existing games and history are kept."
+          : "LudusAtlas will detect games inside this emulator again.",
       });
     } catch (error) {
       addToast({
@@ -150,40 +124,6 @@ export function SettingsView() {
       });
     } finally {
       setEmulatorSyncing(null);
-    }
-  }
-
-  async function handleCheckForUpdate() {
-    setUpdateStatus("checking");
-    setUpdateResult(null);
-    setInstallProgress(null);
-    setUpdateError(null);
-
-    try {
-      const result = await checkForUpdate();
-      setUpdateResult(result);
-      setUpdateStatus(result.status === "available" ? "available" : "current");
-    } catch (error) {
-      setUpdateError(formatError(error));
-      setUpdateStatus("error");
-    }
-  }
-
-  async function handleInstallUpdate() {
-    setUpdateNotesOpen(false);
-    setUpdateStatus("installing");
-    setInstallProgress(null);
-    setUpdateError(null);
-
-    try {
-      const installed = await installAvailableUpdate(setInstallProgress);
-      if (!installed) {
-        setUpdateResult({ status: "current" });
-        setUpdateStatus("current");
-      }
-    } catch (error) {
-      setUpdateError(formatError(error));
-      setUpdateStatus("error");
     }
   }
 
@@ -230,16 +170,7 @@ export function SettingsView() {
     }
   }
 
-  const updateButtonDisabled =
-    updateStatus === "checking" || updateStatus === "installing";
-  const progressLabel = installProgress
-    ? formatBytesProgress(installProgress)
-    : null;
   const installedReleaseNote = findReleaseNote(appVersion);
-  const availableDisplayNotes =
-    updateResult?.status === "available"
-      ? parseManifestNotes(updateResult.notes)
-      : parseManifestNotes(null);
   const displayedEmulators = new Map(knownEmulators);
   for (const rawEmulatorId of settings.ignoredEmulatorIds ?? []) {
     const emulatorId = rawEmulatorId.trim().toLowerCase();
@@ -262,7 +193,7 @@ export function SettingsView() {
         title="General"
       >
         <SettingsRow
-          description="Strongly recommended. PlayCounter starts when you sign in so it can detect every game session; if disabled, tracking only works after you open the app manually."
+          description="Strongly recommended. LudusAtlas starts when you sign in so it can detect every game session; if disabled, tracking only works after you open the app manually."
           title="Launch on startup"
         >
           <input
@@ -281,7 +212,7 @@ export function SettingsView() {
             <div>
               <div className="font-semibold">Auto-start is disabled</div>
               <p className="mt-1 leading-5">
-                This is not recommended. PlayCounter cannot detect or record
+                This is not recommended. LudusAtlas cannot detect or record
                 sessions until you open it manually.
               </p>
             </div>
@@ -305,11 +236,11 @@ export function SettingsView() {
 
       <SettingsPanel
         dataTour="settings-appearance"
-        description="Personalize PlayCounter's interactive controls and highlights."
+        description="Personalize LudusAtlas's interactive controls and highlights."
         title="Appearance"
       >
         <SettingsRow
-          description="Choose an accent color. PlayCounter adjusts it automatically for readable contrast in both themes."
+          description="Choose an accent color. LudusAtlas adjusts it automatically for readable contrast in both themes."
           title="Accent color"
         >
           <div className="flex items-center gap-2">
@@ -341,7 +272,7 @@ export function SettingsView() {
           title="Desktop popups"
         >
           <SettingsRow
-            description="Works even when PlayCounter is only running in the tray."
+            description="Works even when LudusAtlas is only running in the tray."
             title="Show desktop popups"
           >
             <input
@@ -357,10 +288,10 @@ export function SettingsView() {
             />
           </SettingsRow>
           <p className="-mt-3 text-xs text-text-faint">
-            Popups stay hidden while the PlayCounter window is open and focused.
+            Popups stay hidden while the LudusAtlas window is open and focused.
           </p>
           <SettingsRow
-            description="Popup when PlayCounter recognizes a game for the first time."
+            description="Popup when LudusAtlas recognizes a game for the first time."
             title="First-time detections"
           >
             <input
@@ -428,7 +359,7 @@ export function SettingsView() {
             />
           </SettingsRow>
           <SettingsRow
-            description="Popup when PlayCounter finds an app it does not know. Only apps found while this is on are included."
+            description="Popup when LudusAtlas finds an app it does not know. Only apps found while this is on are included."
             title="New discoveries"
           >
             <input
@@ -545,12 +476,12 @@ export function SettingsView() {
       </SettingsPanel>
 
       <SettingsPanel
-        description="Tune how PlayCounter finds apps and retries unknown ones."
+        description="Tune how LudusAtlas finds apps and retries unknown ones."
         title="Discovery"
       >
         <SettingsRow
           dataTour="settings-sharing"
-          description="When you ignore an app PlayCounter does not recognize, it sends the file name, your platform, and an anonymous install ID. Playtime and game history are never sent."
+          description="When you ignore an app LudusAtlas does not recognize, it sends the file name, your platform, and an anonymous install ID to the PlayCounter Community service. Playtime and game history are never sent."
           title="Share apps you ignore"
         >
           <input
@@ -563,7 +494,7 @@ export function SettingsView() {
           />
         </SettingsRow>
         <SettingsRow
-          description="Apps in this list are skipped before PlayCounter tries to match them. Built-in system defaults plus your own file."
+          description="Apps in this list are skipped before LudusAtlas tries to match them. Built-in system defaults plus your own file."
           title="Ignored apps"
         >
           <Button
@@ -576,7 +507,7 @@ export function SettingsView() {
                 addToast({
                   tone: "success",
                   title: "Ignore list reloaded",
-                  detail: "PlayCounter read the list again and rescanned.",
+                  detail: "LudusAtlas read the list again and rescanned.",
                 });
               } catch (error) {
                 addToast({
@@ -686,7 +617,7 @@ export function SettingsView() {
 
       <SettingsPanel
         dataTour="settings-updates"
-        description="Check and install updates from the configured release feed."
+        description="Release-feed safety for this development build."
         title="Updates"
       >
         <SettingsRow
@@ -706,88 +637,16 @@ export function SettingsView() {
             View
           </Button>
         </SettingsRow>
-        <div className="flex items-start justify-between gap-5">
-          <div className="min-w-0">
-            <h3 className="font-medium text-text">App updates</h3>
-            <p className="mt-1 text-sm text-text-muted">
-              Check for a new PlayCounter version immediately.
-            </p>
-            <p className="mt-2 text-sm text-text-muted">
-              {isOffline
-                ? "Update checks unavailable offline."
-                : formatUpdateStatus(updateStatus, updateResult, progressLabel)}
-            </p>
-            {updateError ? (
-              <p className="mt-2 break-words text-sm text-danger">
-                {updateError}
-              </p>
-            ) : null}
-          </div>
-          <div className="flex shrink-0 gap-2">
-            {updateResult?.status === "available" &&
-            !isEmptyDisplayNotes(availableDisplayNotes) ? (
-              <Button
-                variant="secondary"
-                onClick={() => setUpdateNotesOpen(true)}
-                disabled={updateStatus === "installing"}
-              >
-                What's new
-              </Button>
-            ) : null}
-            {updateStatus === "available" || updateStatus === "installing" ? (
-              <Button
-                variant="primary"
-                icon={Download}
-                loading={updateStatus === "installing"}
-                onClick={() => void handleInstallUpdate()}
-                disabled={updateButtonDisabled || isOffline}
-              >
-                {updateStatus === "installing" ? "Installing…" : "Install"}
-              </Button>
-            ) : null}
-            <Button
-              icon={RotateCcw}
-              loading={updateStatus === "checking"}
-              onClick={() => void handleCheckForUpdate()}
-              disabled={updateButtonDisabled || isOffline}
-              title={
-                isOffline ? "Update checks unavailable offline" : undefined
-              }
-            >
-              Check
-            </Button>
-          </div>
+        <div>
+          <h3 className="font-medium text-text">App updates disabled</h3>
+          <p className="mt-1 text-sm text-text-muted">
+            {UPDATE_POLICY.message}
+          </p>
+          <p className="mt-2 text-sm text-text-muted">
+            No PlayCounter or third-party release endpoint is configured.
+          </p>
         </div>
       </SettingsPanel>
-      {updateNotesOpen && updateResult?.status === "available" ? (
-        <ReleaseNotesDialog
-          version={updateResult.version}
-          eyebrow="Update available"
-          sections={[
-            {
-              version: updateResult.version,
-              notes: availableDisplayNotes,
-            },
-          ]}
-          onClose={() => setUpdateNotesOpen(false)}
-          footer={
-            <div className="flex justify-end">
-              <Button
-                variant="primary"
-                icon={Download}
-                loading={updateStatus === "installing"}
-                disabled={isOffline}
-                data-autofocus
-                onClick={() => void handleInstallUpdate()}
-              >
-                {updateStatus === "installing"
-                  ? "Installing…"
-                  : "Install update"}
-              </Button>
-            </div>
-          }
-        />
-      ) : null}
       {confirmImport ? (
         <ImportDataDialog
           onCancel={() => setConfirmImport(false)}
@@ -908,7 +767,7 @@ function ImportDataDialog({
         <p className="mt-2 text-sm text-text-muted">
           This replaces your current play history, game cache, and settings with
           the contents of the backup file. Your current data is saved to a
-          backup file first, and PlayCounter reloads when the import finishes.
+          backup file first, and LudusAtlas reloads when the import finishes.
         </p>
         <div className="mt-5 grid gap-2 sm:grid-cols-2">
           <Button variant="secondary" onClick={onCancel}>
@@ -921,37 +780,6 @@ function ImportDataDialog({
       </div>
     </div>
   );
-}
-
-function formatUpdateStatus(
-  status: UpdateStatus,
-  result: UpdateCheckResult | null,
-  progressLabel: string | null,
-) {
-  if (status === "checking") return "Checking for updates...";
-  if (status === "installing") {
-    return progressLabel
-      ? `Downloading and installing ${progressLabel}`
-      : "Preparing update...";
-  }
-  if (status === "available" && result?.status === "available") {
-    return `Version ${result.version} is available.`;
-  }
-  if (status === "current") return "PlayCounter is up to date.";
-  if (status === "error") return "Update check failed.";
-  return "No update check has run in this session.";
-}
-
-function formatBytesProgress(progress: InstallProgress) {
-  const downloaded = formatBytes(progress.downloadedBytes);
-  if (!progress.totalBytes) return downloaded;
-
-  return `${downloaded} of ${formatBytes(progress.totalBytes)}`;
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function formatError(error: unknown) {

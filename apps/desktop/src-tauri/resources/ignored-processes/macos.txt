@@ -1,4 +1,4 @@
-# PlayCounter built-in ignored processes for macOS.
+# LudusAtlas built-in ignored processes for macOS.
 # One process name per line. Lines starting with # are ignored.
 
 accountsd

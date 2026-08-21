@@ -7,8 +7,12 @@ const bundleRoots = bundleRootsArg
   .split(",")
   .map((root) => resolve(process.cwd(), root.trim()))
   .filter(Boolean);
-const releaseBaseUrl =
-  process.argv[3] ?? "https://stplaycountereuw.blob.core.windows.net/releases";
+const releaseBaseUrl = process.argv[3];
+if (!releaseBaseUrl) {
+  throw new Error(
+    "A LudusAtlas-owned release base URL is required to create an updater manifest.",
+  );
+}
 const latestPath = resolve(
   process.cwd(),
   process.argv[4] ?? join(bundleRoots[0], "latest.json"),
