@@ -6,6 +6,7 @@ const files = {
   desktopPackage: "apps/desktop/package.json",
   tauriConfig: "apps/desktop/src-tauri/tauri.conf.json",
   cargoManifest: "apps/desktop/src-tauri/Cargo.toml",
+  tauriCapabilities: "apps/desktop/src-tauri/capabilities/default.json",
   updaterPolicy: "apps/desktop/src/updater.ts",
   backup: "apps/desktop/src/backup.ts",
   backupTest: "apps/desktop/src/backup.test.ts",
@@ -205,6 +206,34 @@ async function checkUpdaterBoundary() {
     ],
     "disabled LudusAtlas updater policy",
   );
+
+  const capabilities = await readJson(files.tauriCapabilities);
+  const updaterPermissions = Array.isArray(capabilities?.permissions)
+    ? capabilities.permissions.filter(
+        (permission) =>
+          typeof permission === "string" && permission.startsWith("updater:"),
+      )
+    : [];
+  if (updaterPermissions.length > 0) {
+    fail(
+      `${files.tauriCapabilities} must not declare updater permissions: ${updaterPermissions.join(", ")}`,
+    );
+  }
+
+  const desktopPackage = await readJson(files.desktopPackage);
+  if (
+    desktopPackage?.dependencies?.["@tauri-apps/plugin-updater"] ||
+    desktopPackage?.devDependencies?.["@tauri-apps/plugin-updater"]
+  ) {
+    fail(
+      `${files.desktopPackage} must not depend on the Tauri updater plugin.`,
+    );
+  }
+
+  const cargoManifest = await readText(files.cargoManifest);
+  if (/^tauri-plugin-updater\s*=/m.test(cargoManifest ?? "")) {
+    fail(`${files.cargoManifest} must not depend on tauri-plugin-updater.`);
+  }
 }
 
 async function checkCompatibilityAllowlist() {
