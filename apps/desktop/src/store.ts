@@ -5,6 +5,7 @@ import type {
   Game,
   GameSource,
   IdentifierFlagReason,
+  LibraryStatCardId,
   Session,
   Settings,
   Theme,
@@ -17,6 +18,7 @@ import {
   type DiscoveredReviewReminder,
 } from "./discoveredReminder";
 import type { AppNotification } from "./notifications";
+import type { InstallPresenceMarker } from "./installPresence";
 import type { AwardedMilestone } from "./milestones";
 import { EMPTY_CONTRIBUTION_COUNTS } from "./notifications";
 import { persistAppState } from "./persistence";
@@ -29,13 +31,35 @@ import type {
   KnownEmulator,
 } from "./emulators/types";
 import { findTour } from "./ui/tour/tourDefinitions";
+import { manualLaunchTargetKey } from "./gameLaunch";
+import type {
+  EmulatorBinaryEntry,
+  EmulatorLaunchCandidate,
+  EmulatorLaunchTarget,
+} from "./emulatorLaunch";
 import { stepView } from "./ui/tour/tourNavigation";
+import type {
+  LibraryImportEntry,
+  LibraryInstallEntry,
+  ScopedExeLink,
+} from "./library/types";
+import { libraryEntryKey } from "./library/types";
+import { scopedExeLinkKey } from "./library/scopedLinks";
+import type { LocalLinkRef } from "./localLinks";
 import {
   defaultTourProgress,
   markTourCompleted,
   markWelcomeSeen,
   type TourProgress,
 } from "./ui/tour/tourState";
+import {
+  DEFAULT_IMPORT_PROVIDER,
+  type BuiltinImportProviderId,
+} from "./library/importProviders";
+import type { LibraryTabId } from "./ui/libraryTabs";
+import type { MyGamesCardSize } from "./ui/myGamesPresentation";
+import { DEFAULT_LIBRARY_STAT_CARD_IDS } from "./ui/myGamesStats";
+import type { MyGamesSortKey } from "./ui/myGamesSort";
 
 export type ViewId =
   | "now"
@@ -43,6 +67,7 @@ export type ViewId =
   | "dosbox"
   | "dolphin"
   | "games"
+  | "import"
   | "discovered"
   | "history"
   | "achievements"
@@ -56,7 +81,9 @@ export type ProcessSnapshot = {
   startedAtUnix?: number;
   emulatorId?: string | null;
   commandLine?: string[] | null;
+  workingDirectory?: string | null;
   windowTitle?: string | null;
+  openFiles?: string[] | null;
 };
 
 export type ActiveSession = {
@@ -93,6 +120,7 @@ export type GameMetadata = {
   igdbId?: number;
   name: string;
   coverUrl: string;
+  releaseYear?: number;
   source: Exclude<GameSource, "custom">;
 };
 
@@ -104,11 +132,16 @@ export type ExeCacheEntry = {
   gameName?: string;
   coverUrl?: string;
   source?: GameSource;
+  /** Provenance of the executable mapping, separate from game identity. */
+  identifierSource?: GameSource;
   pendingCommunityGame?: Game;
   communitySuggestionId?: number;
   communitySuggestionVerified?: boolean;
   communitySuggestionStatus?: ContributionStatus;
   communitySuggestionNote?: string;
+  shareState?: "unshared" | "failed";
+  libraryProvider?: LibraryImportEntry["provider"];
+  libraryExternalId?: string;
   communityUpgradeGame?: Game;
   dismissedCommunityUpgradeGameId?: number;
   // IGDB and community ids come from separate sequences and can collide, so a
@@ -125,6 +158,17 @@ export type ExeCacheEntry = {
   // added on the fly when read or credited). Cleared on hydrate so time spent
   // while the app was closed is never credited.
   runningSince?: string;
+};
+
+export type LaunchTargetOwner = {
+  gameId: number;
+  source: GameSource | null;
+};
+
+export type LaunchTarget = {
+  exeName: string;
+  path: string;
+  owner: LaunchTargetOwner;
 };
 
 export function canSwitchApprovedSuggestionToCommunity(value: {
@@ -151,6 +195,82 @@ export function canSuggestCustomGameToCommunity(value: {
     (value.communitySuggestionId === undefined ||
       value.communitySuggestionStatus === "rejected")
   );
+}
+
+export function canCancelCommunitySuggestion(value: {
+  source?: GameSource | null;
+  exeName?: string | null;
+  communitySuggestionId?: number;
+  communitySuggestionVerified?: boolean;
+  communitySuggestionStatus?: ContributionStatus;
+}) {
+  if (
+    value.source !== "custom" ||
+    !value.exeName ||
+    value.communitySuggestionId === undefined
+  ) {
+    return false;
+  }
+
+  const status =
+    value.communitySuggestionStatus ??
+    (value.communitySuggestionVerified ? "verified" : "pending");
+  return status === "pending";
+}
+
+export type PendingCommunitySuggestionTarget = {
+  ref: LocalLinkRef;
+  exeName: string;
+  gameId: number;
+};
+
+export function findPendingCommunitySuggestionEntry(
+  exeNames: readonly string[],
+  exeCache: ReadonlyMap<string, ExeCacheEntry>,
+  scopedExeLinks: ReadonlyMap<string, ScopedExeLink> = new Map(),
+): PendingCommunitySuggestionTarget | null {
+  if (exeNames.length === 0) return null;
+  const wanted = new Set(exeNames.map((exeName) => exeName.toLowerCase()));
+  for (const exeName of exeNames) {
+    const key = exeName.toLowerCase();
+    const entry = exeCache.get(key);
+    if (
+      entry?.state === "matched" &&
+      canCancelCommunitySuggestion({
+        source: entry.source,
+        exeName: entry.exeName,
+        communitySuggestionId: entry.communitySuggestionId,
+        communitySuggestionVerified: entry.communitySuggestionVerified,
+        communitySuggestionStatus: entry.communitySuggestionStatus,
+      })
+    ) {
+      return {
+        ref: { kind: "exe", key },
+        exeName: entry.exeName,
+        gameId: entry.communitySuggestionId!,
+      };
+    }
+  }
+  for (const [key, entry] of scopedExeLinks) {
+    if (
+      wanted.has(entry.exeName.toLowerCase()) &&
+      canCancelCommunitySuggestion({
+        source: entry.source,
+        exeName: entry.exeName,
+        communitySuggestionId: entry.communitySuggestionId,
+        communitySuggestionVerified: entry.communitySuggestionVerified,
+        communitySuggestionStatus: entry.communitySuggestionStatus,
+      })
+    ) {
+      return {
+        ref: { kind: "scoped", key },
+        exeName: entry.exeName,
+        gameId: entry.communitySuggestionId!,
+      };
+    }
+  }
+
+  return null;
 }
 
 export type ApiRequestLogEntry = {
@@ -194,6 +314,7 @@ export type DesktopOverlaySettingKey =
   | "overlaySessionStarts"
   | "overlaySessionSummaries"
   | "overlayMilestones"
+  | "overlayActionRequired"
   | "overlayDiscoveries";
 
 export type ActiveTour = {
@@ -203,8 +324,10 @@ export type ActiveTour = {
   enteredStepAt: number;
 };
 
-type AppState = {
+export type AppState = {
   activeView: ViewId;
+  libraryTab: LibraryTabId;
+  libraryImportProvider: BuiltinImportProviderId;
   historyQuery: string;
   historyGameKey: string | null;
   installUuid: string | null;
@@ -223,11 +346,22 @@ type AppState = {
   userIgnoredProcesses: Set<string>;
   userIgnoredProcessesPath: string | null;
   exeCache: Map<string, ExeCacheEntry>;
+  libraryImports: Map<string, LibraryImportEntry>;
+  libraryInstalls: Map<string, LibraryInstallEntry>;
+  scopedExeLinks: Map<string, ScopedExeLink>;
+  launchTargets: Map<string, LaunchTarget>;
+  manualLaunchTargets: Map<string, LaunchTarget>;
+  emulatorAutoBinaries: Map<string, EmulatorBinaryEntry>;
+  emulatorManualBinaries: Map<string, EmulatorBinaryEntry>;
+  emulatorAutoLaunchTargets: Map<string, EmulatorLaunchTarget>;
+  emulatorManualLaunchTargets: Map<string, EmulatorLaunchTarget>;
+  emulatorLaunchCandidates: Map<string, EmulatorLaunchCandidate>;
   apiRequestLog: ApiRequestLogEntry[];
   runtimeLog: RuntimeLogEntry[];
   blacklist: Set<string>;
   runtimeError: string | null;
   backendHealth: BackendHealth;
+  installPresenceMarker: InstallPresenceMarker | null;
   toasts: Toast[];
   notifications: AppNotification[];
   discoveredReviewReminder: DiscoveredReviewReminder;
@@ -253,6 +387,8 @@ type AppState = {
   cleanup: (() => void) | null;
   settings: Settings;
   setActiveView: (view: ViewId) => void;
+  setLibraryTab: (tab: LibraryTabId) => void;
+  setLibraryImportProvider: (provider: BuiltinImportProviderId) => void;
   startTour: (tourId: string) => void;
   goToTourStep: (index: number, resetDemo?: boolean) => void;
   endTour: (outcome: "completed" | "dismissed") => void;
@@ -286,10 +422,42 @@ type AppState = {
   ) => void;
   setExeCacheEntry: (entry: ExeCacheEntry) => void;
   removeExeCacheEntry: (exeName: string) => void;
+  setLibraryImport: (entry: LibraryImportEntry) => void;
+  removeLibraryImport: (
+    provider: LibraryImportEntry["provider"],
+    externalId: string,
+  ) => void;
+  setLibraryInstall: (entry: LibraryInstallEntry) => void;
+  removeLibraryInstall: (
+    provider: LibraryInstallEntry["provider"],
+    externalId: string,
+  ) => void;
+  setScopedExeLink: (entry: ScopedExeLink) => void;
+  removeScopedExeLink: (key: string) => void;
+  clearLibraryData: () => void;
+  setLaunchTarget: (target: LaunchTarget) => void;
+  removeLaunchTarget: (exeName: string) => void;
+  setManualLaunchTarget: (
+    target: LaunchTarget,
+    aliases?: readonly LaunchTargetOwner[],
+  ) => void;
+  removeManualLaunchTarget: (owner: LaunchTargetOwner) => void;
+  setEmulatorAutoBinary: (entry: EmulatorBinaryEntry) => void;
+  removeEmulatorAutoBinary: (emulatorId: string) => void;
+  setEmulatorManualBinary: (entry: EmulatorBinaryEntry) => void;
+  removeEmulatorManualBinary: (emulatorId: string) => void;
+  setEmulatorAutoLaunchTarget: (target: EmulatorLaunchTarget) => void;
+  removeEmulatorAutoLaunchTarget: (contentKey: string) => void;
+  setEmulatorManualLaunchTarget: (target: EmulatorLaunchTarget) => void;
+  removeEmulatorManualLaunchTarget: (contentKey: string) => void;
+  setEmulatorLaunchCandidates: (candidates: EmulatorLaunchCandidate[]) => void;
+  forgetExecutableLaunchTargets: () => void;
+  forgetEmulatorLaunchTargets: () => void;
   addApiRequestLogEntry: (entry: Omit<ApiRequestLogEntry, "id" | "at">) => void;
   addRuntimeLogEntry: (message: string) => void;
   setRuntimeError: (error: string | null) => void;
   setBackendHealth: (health: BackendHealth) => void;
+  setInstallPresenceMarker: (marker: InstallPresenceMarker) => void;
   addToast: (toast: Omit<Toast, "id">) => void;
   dismissToast: (toastId: number) => void;
   addNotification: (notification: AppNotification) => void;
@@ -308,13 +476,33 @@ type AppState = {
   setCleanup: (cleanup: () => void) => void;
   setLaunchOnStartup: (enabled: boolean) => void;
   setShowDurationDays: (enabled: boolean) => void;
+  setMyGamesCardSize: (size: MyGamesCardSize) => void;
+  setMyGamesSortKey: (key: MyGamesSortKey) => void;
+  setMyGamesShowOriginBadges: (enabled: boolean) => void;
+  setMyGamesShowMatchBadges: (enabled: boolean) => void;
+  setMyGamesHighResCovers: (enabled: boolean) => void;
+  setMyGamesShowStatCards: (enabled: boolean) => void;
+  setMyGamesHideEmptyProviderTabs: (enabled: boolean) => void;
+  setMyGamesStatCards: (ids: LibraryStatCardId[]) => void;
   setAutoShareIgnoredProcesses: (enabled: boolean) => void;
   setEmulatorSetting: (
     key: "emulatorDetection" | "emulatorContentLookup",
     enabled: boolean,
   ) => void;
+  setOverlayMonitor: (monitor: string) => void;
+  setHotkey: (
+    key: "showWindowHotkey" | "currentSessionHotkey",
+    shortcut: string | null,
+  ) => void;
   setDesktopOverlaySetting: (
     key: DesktopOverlaySettingKey,
+    enabled: boolean,
+  ) => void;
+  setLauncherSetting: (
+    key:
+      | "rememberLaunchPaths"
+      | "gameLaunchingEnabled"
+      | "controllerNavigationEnabled",
     enabled: boolean,
   ) => void;
   recordAutomaticDetection: (keys: string[]) => boolean;
@@ -329,7 +517,6 @@ type AppState = {
   setAccentColor: (color: string | null) => void;
   toggleVerboseLogs: () => void;
   toggleBlacklist: (exeName: string, enabled: boolean) => void;
-  clearCache: () => void;
 };
 
 export const DEFAULT_API_ENDPOINT =
@@ -343,6 +530,14 @@ export const BUILD_STAGE: Stage =
 const defaultSettings: Settings = {
   launchOnStartup: true,
   showDurationDays: false,
+  libraryCardSize: "grid",
+  librarySortKey: "recent",
+  libraryShowOriginBadges: true,
+  libraryShowMatchBadges: true,
+  libraryHighResCovers: false,
+  libraryStatCards: [...DEFAULT_LIBRARY_STAT_CARD_IDS],
+  libraryShowStatCards: true,
+  libraryHideEmptyProviderTabs: false,
   autoShareIgnoredProcesses: false,
   pollingIntervalSeconds: 5,
   unmatchedRetryDays: 30,
@@ -354,11 +549,16 @@ const defaultSettings: Settings = {
   emulatorContentLookup: true,
   ignoredEmulatorIds: [],
   desktopOverlaysEnabled: true,
+  overlayMonitor: "primary",
   overlayFirstDetections: true,
   overlaySessionStarts: true,
   overlaySessionSummaries: true,
   overlayMilestones: true,
+  overlayActionRequired: true,
   overlayDiscoveries: false,
+  rememberLaunchPaths: true,
+  gameLaunchingEnabled: false,
+  controllerNavigationEnabled: false,
 };
 
 let nextRuntimeLogId = 0;
@@ -377,6 +577,14 @@ function addSessionsToArchive(
     archivedGameSeconds[key] = (archivedGameSeconds[key] ?? 0) + seconds;
   }
   return { archivedSeconds, archivedGameSeconds };
+}
+
+export function foldSessionsIntoArchive(
+  archivedSeconds: number,
+  archivedGameSeconds: Record<string, number>,
+  sessions: Session[],
+) {
+  return addSessionsToArchive(archivedSeconds, archivedGameSeconds, sessions);
 }
 
 function persistSoon() {
@@ -417,6 +625,8 @@ function persistSoon() {
 
 export const useAppStore = create<AppState>((set, get) => ({
   activeView: "now",
+  libraryTab: "all",
+  libraryImportProvider: DEFAULT_IMPORT_PROVIDER,
   historyQuery: "",
   historyGameKey: null,
   installUuid: null,
@@ -435,11 +645,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   userIgnoredProcesses: new Set(),
   userIgnoredProcessesPath: null,
   exeCache: new Map(),
+  libraryImports: new Map(),
+  libraryInstalls: new Map(),
+  scopedExeLinks: new Map(),
+  launchTargets: new Map(),
+  manualLaunchTargets: new Map(),
+  emulatorAutoBinaries: new Map(),
+  emulatorManualBinaries: new Map(),
+  emulatorAutoLaunchTargets: new Map(),
+  emulatorManualLaunchTargets: new Map(),
+  emulatorLaunchCandidates: new Map(),
   apiRequestLog: [],
   runtimeLog: [],
   blacklist: new Set(),
   runtimeError: null,
   backendHealth: { status: "checking", checkedAt: null, detail: null },
+  installPresenceMarker: null,
   toasts: [],
   notifications: [],
   discoveredReviewReminder: null,
@@ -465,6 +686,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   cleanup: null,
   settings: defaultSettings,
   setActiveView: (activeView) => set({ activeView }),
+  setLibraryTab: (libraryTab) => set({ libraryTab }),
+  setLibraryImportProvider: (libraryImportProvider) =>
+    set({ libraryImportProvider }),
   startTour: (tourId) => {
     const tour = findTour(tourId);
     if (!tour) return;
@@ -694,7 +918,36 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const exeCache = new Map(state.exeCache);
       exeCache.set(entry.exeName.toLowerCase(), entry);
-      return { exeCache };
+      if (entry.state !== "matched") return { exeCache };
+      let libraryImports = state.libraryImports;
+      for (const [key, imported] of state.libraryImports) {
+        const sameGame =
+          (entry.igdbId !== undefined && entry.igdbId === imported.igdbId) ||
+          (entry.gameId === imported.gameId &&
+            entry.source === imported.source);
+        if (
+          !sameGame ||
+          imported.linkedExeNames.some(
+            (exeName) => exeName.toLowerCase() === entry.exeName.toLowerCase(),
+          )
+        ) {
+          continue;
+        }
+        if (libraryImports === state.libraryImports) {
+          libraryImports = new Map(state.libraryImports);
+        }
+        const identifierSource = entry.identifierSource ?? entry.source;
+        libraryImports.set(key, {
+          ...imported,
+          linkedExeNames: [...imported.linkedExeNames, entry.exeName],
+          linkedExeSources:
+            identifierSource &&
+            !imported.linkedExeSources.includes(identifierSource)
+              ? [...imported.linkedExeSources, identifierSource]
+              : imported.linkedExeSources,
+        });
+      }
+      return { exeCache, libraryImports };
     }),
   removeExeCacheEntry: (exeName) =>
     set((state) => {
@@ -702,6 +955,234 @@ export const useAppStore = create<AppState>((set, get) => ({
       exeCache.delete(exeName.toLowerCase());
       return { exeCache };
     }),
+  setLibraryImport: (entry) => {
+    set((state) => {
+      const libraryImports = new Map(state.libraryImports);
+      libraryImports.set(
+        libraryEntryKey(entry.provider, entry.externalId),
+        entry,
+      );
+      return { libraryImports };
+    });
+    persistSoon();
+  },
+  removeLibraryImport: (provider, externalId) => {
+    set((state) => {
+      const key = libraryEntryKey(provider, externalId);
+      const libraryImports = new Map(state.libraryImports);
+      const libraryInstalls = new Map(state.libraryInstalls);
+      const scopedExeLinks = new Map(state.scopedExeLinks);
+      libraryImports.delete(key);
+      libraryInstalls.delete(key);
+      for (const [linkKey, link] of scopedExeLinks) {
+        if (link.provider === provider && link.externalId === externalId) {
+          scopedExeLinks.delete(linkKey);
+        }
+      }
+      return { libraryImports, libraryInstalls, scopedExeLinks };
+    });
+    persistSoon();
+  },
+  setLibraryInstall: (entry) => {
+    set((state) => {
+      const libraryInstalls = new Map(state.libraryInstalls);
+      libraryInstalls.set(
+        libraryEntryKey(entry.provider, entry.externalId),
+        entry,
+      );
+      return { libraryInstalls };
+    });
+    persistSoon();
+  },
+  removeLibraryInstall: (provider, externalId) => {
+    set((state) => {
+      const libraryInstalls = new Map(state.libraryInstalls);
+      libraryInstalls.delete(libraryEntryKey(provider, externalId));
+      return { libraryInstalls };
+    });
+    persistSoon();
+  },
+  setScopedExeLink: (entry) => {
+    const key = scopedExeLinkKey(entry.exeName, entry.pathPrefix);
+    if (!key) return;
+    set((state) => {
+      const scopedExeLinks = new Map(state.scopedExeLinks);
+      scopedExeLinks.set(key, entry);
+      return { scopedExeLinks };
+    });
+    persistSoon();
+  },
+  removeScopedExeLink: (key) => {
+    set((state) => {
+      const scopedExeLinks = new Map(state.scopedExeLinks);
+      scopedExeLinks.delete(key);
+      return { scopedExeLinks };
+    });
+    persistSoon();
+  },
+  clearLibraryData: () => {
+    set({
+      libraryImports: new Map(),
+      libraryInstalls: new Map(),
+      scopedExeLinks: new Map(),
+    });
+    persistSoon();
+  },
+  setLaunchTarget: (target) =>
+    set((state) => {
+      if (state.settings.rememberLaunchPaths === false) return state;
+      const launchTargets = new Map(state.launchTargets);
+      launchTargets.set(target.exeName.toLowerCase(), target);
+      return { launchTargets };
+    }),
+  removeLaunchTarget: (exeName) =>
+    set((state) => {
+      const launchTargets = new Map(state.launchTargets);
+      launchTargets.delete(exeName.toLowerCase());
+      return { launchTargets };
+    }),
+  setManualLaunchTarget: (target, aliases = [target.owner]) =>
+    set((state) => {
+      if (state.settings.rememberLaunchPaths === false) return state;
+      const manualLaunchTargets = new Map(state.manualLaunchTargets);
+      for (const alias of aliases) {
+        manualLaunchTargets.delete(manualLaunchTargetKey(alias));
+      }
+      manualLaunchTargets.set(manualLaunchTargetKey(target.owner), target);
+      return { manualLaunchTargets };
+    }),
+  removeManualLaunchTarget: (owner) =>
+    set((state) => {
+      const manualLaunchTargets = new Map(state.manualLaunchTargets);
+      manualLaunchTargets.delete(manualLaunchTargetKey(owner));
+      return { manualLaunchTargets };
+    }),
+  setEmulatorAutoBinary: (entry) => {
+    set((state) => {
+      if (state.settings.rememberLaunchPaths === false) return state;
+      if (state.emulatorAutoBinaries.has(entry.emulatorId)) return state;
+      const emulatorAutoBinaries = new Map(state.emulatorAutoBinaries);
+      emulatorAutoBinaries.set(entry.emulatorId, entry);
+      return { emulatorAutoBinaries };
+    });
+    persistSoon();
+  },
+  removeEmulatorAutoBinary: (emulatorId) => {
+    set((state) => {
+      const emulatorAutoBinaries = new Map(state.emulatorAutoBinaries);
+      emulatorAutoBinaries.delete(emulatorId);
+      return { emulatorAutoBinaries };
+    });
+    persistSoon();
+  },
+  setEmulatorManualBinary: (entry) => {
+    set((state) => {
+      if (state.settings.rememberLaunchPaths === false) return state;
+      const emulatorManualBinaries = new Map(state.emulatorManualBinaries);
+      emulatorManualBinaries.set(entry.emulatorId, entry);
+      return { emulatorManualBinaries };
+    });
+    persistSoon();
+  },
+  removeEmulatorManualBinary: (emulatorId) => {
+    set((state) => {
+      const emulatorManualBinaries = new Map(state.emulatorManualBinaries);
+      emulatorManualBinaries.delete(emulatorId);
+      return { emulatorManualBinaries };
+    });
+    persistSoon();
+  },
+  setEmulatorAutoLaunchTarget: (target) => {
+    set((state) => {
+      if (state.settings.rememberLaunchPaths === false) return state;
+      if (
+        state.emulatorAutoLaunchTargets.has(target.contentKey) ||
+        state.emulatorManualLaunchTargets.has(target.contentKey)
+      ) {
+        return state;
+      }
+      const emulatorAutoLaunchTargets = new Map(
+        state.emulatorAutoLaunchTargets,
+      );
+      emulatorAutoLaunchTargets.set(target.contentKey, target);
+      return { emulatorAutoLaunchTargets };
+    });
+    persistSoon();
+  },
+  removeEmulatorAutoLaunchTarget: (contentKey) => {
+    set((state) => {
+      const emulatorAutoLaunchTargets = new Map(
+        state.emulatorAutoLaunchTargets,
+      );
+      emulatorAutoLaunchTargets.delete(contentKey);
+      return { emulatorAutoLaunchTargets };
+    });
+    persistSoon();
+  },
+  setEmulatorManualLaunchTarget: (target) => {
+    set((state) => {
+      if (state.settings.rememberLaunchPaths === false) return state;
+      const emulatorManualLaunchTargets = new Map(
+        state.emulatorManualLaunchTargets,
+      );
+      emulatorManualLaunchTargets.set(target.contentKey, target);
+      return { emulatorManualLaunchTargets };
+    });
+    persistSoon();
+  },
+  removeEmulatorManualLaunchTarget: (contentKey) => {
+    set((state) => {
+      const emulatorManualLaunchTargets = new Map(
+        state.emulatorManualLaunchTargets,
+      );
+      emulatorManualLaunchTargets.delete(contentKey);
+      return { emulatorManualLaunchTargets };
+    });
+    persistSoon();
+  },
+  setEmulatorLaunchCandidates: (candidates) => {
+    let changed = false;
+    set((state) => {
+      if (state.settings.rememberLaunchPaths === false) return state;
+      const emulatorLaunchCandidates = new Map(
+        candidates.map((candidate) => [candidate.contentKey, candidate]),
+      );
+      if (
+        emulatorLaunchCandidates.size === state.emulatorLaunchCandidates.size &&
+        [...emulatorLaunchCandidates].every(([key, candidate]) => {
+          const current = state.emulatorLaunchCandidates.get(key);
+          return (
+            current?.emulatorId === candidate.emulatorId &&
+            current.filePath === candidate.filePath &&
+            current.displayName === candidate.displayName &&
+            current.setAt === candidate.setAt
+          );
+        })
+      ) {
+        return state;
+      }
+      changed = true;
+      return { emulatorLaunchCandidates };
+    });
+    if (changed) persistSoon();
+  },
+  forgetExecutableLaunchTargets: () => {
+    set({
+      launchTargets: new Map(),
+      manualLaunchTargets: new Map(),
+    });
+    persistSoon();
+  },
+  forgetEmulatorLaunchTargets: () => {
+    set({
+      emulatorAutoBinaries: new Map(),
+      emulatorManualBinaries: new Map(),
+      emulatorAutoLaunchTargets: new Map(),
+      emulatorManualLaunchTargets: new Map(),
+      emulatorLaunchCandidates: new Map(),
+    });
+    persistSoon();
+  },
   addApiRequestLogEntry: (entry) =>
     set((state) => ({
       apiRequestLog: [
@@ -718,6 +1199,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
   setRuntimeError: (runtimeError) => set({ runtimeError }),
   setBackendHealth: (backendHealth) => set({ backendHealth }),
+  setInstallPresenceMarker: (installPresenceMarker) =>
+    set({ installPresenceMarker }),
   addToast: (toast) =>
     set((state) => ({
       toasts: [{ ...toast, id: nextToastId++ }, ...state.toasts].slice(0, 5),
@@ -862,6 +1345,54 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
     persistSoon();
   },
+  setMyGamesCardSize: (libraryCardSize) => {
+    set((state) => ({
+      settings: { ...state.settings, libraryCardSize },
+    }));
+    persistSoon();
+  },
+  setMyGamesSortKey: (librarySortKey) => {
+    set((state) => ({
+      settings: { ...state.settings, librarySortKey },
+    }));
+    persistSoon();
+  },
+  setMyGamesShowOriginBadges: (libraryShowOriginBadges) => {
+    set((state) => ({
+      settings: { ...state.settings, libraryShowOriginBadges },
+    }));
+    persistSoon();
+  },
+  setMyGamesShowMatchBadges: (libraryShowMatchBadges) => {
+    set((state) => ({
+      settings: { ...state.settings, libraryShowMatchBadges },
+    }));
+    persistSoon();
+  },
+  setMyGamesHighResCovers: (libraryHighResCovers) => {
+    set((state) => ({
+      settings: { ...state.settings, libraryHighResCovers },
+    }));
+    persistSoon();
+  },
+  setMyGamesShowStatCards: (libraryShowStatCards) => {
+    set((state) => ({
+      settings: { ...state.settings, libraryShowStatCards },
+    }));
+    persistSoon();
+  },
+  setMyGamesHideEmptyProviderTabs: (libraryHideEmptyProviderTabs) => {
+    set((state) => ({
+      settings: { ...state.settings, libraryHideEmptyProviderTabs },
+    }));
+    persistSoon();
+  },
+  setMyGamesStatCards: (libraryStatCards) => {
+    set((state) => ({
+      settings: { ...state.settings, libraryStatCards },
+    }));
+    persistSoon();
+  },
   setAutoShareIgnoredProcesses: (enabled) => {
     set((state) => ({
       settings: { ...state.settings, autoShareIgnoredProcesses: enabled },
@@ -874,6 +1405,56 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   setDesktopOverlaySetting: (key, enabled) => {
     set((state) => ({ settings: { ...state.settings, [key]: enabled } }));
+    persistSoon();
+  },
+  setOverlayMonitor: (overlayMonitor) => {
+    set((state) => ({ settings: { ...state.settings, overlayMonitor } }));
+    persistSoon();
+  },
+  setHotkey: (key, shortcut) => {
+    set((state) => ({ settings: { ...state.settings, [key]: shortcut } }));
+    persistSoon();
+  },
+  setLauncherSetting: (key, enabled) => {
+    set((state) => {
+      if (key === "rememberLaunchPaths") {
+        if (enabled) {
+          return {
+            settings: { ...state.settings, rememberLaunchPaths: true },
+          };
+        }
+        return {
+          settings: {
+            ...state.settings,
+            rememberLaunchPaths: false,
+            gameLaunchingEnabled: false,
+            controllerNavigationEnabled: false,
+          },
+          launchTargets: new Map(),
+          manualLaunchTargets: new Map(),
+          emulatorAutoBinaries: new Map(),
+          emulatorManualBinaries: new Map(),
+          emulatorAutoLaunchTargets: new Map(),
+          emulatorManualLaunchTargets: new Map(),
+          emulatorLaunchCandidates: new Map(),
+        };
+      }
+      const remembersPaths = state.settings.rememberLaunchPaths !== false;
+      return {
+        settings: {
+          ...state.settings,
+          [key]:
+            key === "controllerNavigationEnabled" && enabled
+              ? remembersPaths && state.settings.gameLaunchingEnabled === true
+              : key === "gameLaunchingEnabled" && enabled
+                ? remembersPaths
+                : enabled,
+          ...(key === "gameLaunchingEnabled" && !enabled
+            ? { controllerNavigationEnabled: false }
+            : {}),
+        },
+      };
+    });
     persistSoon();
   },
   recordAutomaticDetection: (keys) => {
@@ -962,14 +1543,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     persistSoon();
   },
-  clearCache: () =>
-    set({
-      exeCache: new Map(),
-      gameMetadata: new Map(),
-      emulatorObservations: [],
-      emulatorMappings: new Map(),
-      runtimeError: null,
-    }),
 }));
 
 export function gameMetadataKey(game: Pick<GameMetadata, "id" | "source">) {
@@ -1030,6 +1603,7 @@ export function canonicalGameKey(ref: GameIdentityRef) {
 export function createGameIdentityResolver(
   gameMetadata: ReadonlyMap<string, GameMetadata>,
   exeCache: ReadonlyMap<string, ExeCacheEntry>,
+  libraryImports: ReadonlyMap<string, LibraryImportEntry> = new Map(),
 ): GameIdentityResolver {
   type IdentityEvidence = {
     igdbId?: number;
@@ -1073,6 +1647,9 @@ export function createGameIdentityResolver(
         entry.coverUrl,
       );
     }
+  }
+  for (const entry of libraryImports.values()) {
+    add(entry.gameId, entry.source, entry.igdbId, entry.name, entry.coverUrl);
   }
 
   const conflictedPairs = new Set<string>();

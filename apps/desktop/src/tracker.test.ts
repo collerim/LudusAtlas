@@ -1,11 +1,22 @@
 import type { Contribution, Game, Session } from "@playcounter/shared";
 import type { EmulatorMapping } from "./emulators/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { invokeMock, openMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  openMock: vi.fn(),
+}));
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (value: string) => value,
   invoke: invokeMock,
 }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openMock }));
+import { findManualLaunchTarget, manualLaunchTargetKey } from "./gameLaunch";
+import { buildLibraryImportCommit } from "./library/importPlan";
+import {
+  INSTALL_PRESENCE_RETRY_COOLDOWN_MS,
+  INSTALL_PRESENCE_SUCCESS_COOLDOWN_MS,
+} from "./installPresence";
+import type { LibraryImportEntry } from "./library/types";
 import {
   createGameIdentityResolver,
   resolvedCanonicalGameKey,
@@ -13,25 +24,46 @@ import {
   type ExeCacheEntry,
 } from "./store";
 import {
+  backfillLibraryExecutableCache,
   addManualSession,
   applyGameMatch,
   applyCommunitySuggestionOutcome,
   applyContributionMarkers,
+  cancelCommunitySuggestion,
+  checkBackendHealth,
+  chooseEmulatorLaunchFile,
+  chooseLaunchTarget,
+  clearLocalLibrary,
+  convertLocalSuggestionToCommunity,
   dismissAmbiguousMatch,
   evaluateAndStoreMilestones,
+  forgetManualLaunchTarget,
+  forgetImportedLibraryData,
+  hydrate,
   hydrateGameMetadata,
   findGameMatches,
   ignoreDiscoveredProcess,
+  launchGame,
+  launchEmulatorGame,
+  resetEmulatorLaunchGuardForTests,
+  normalizePersistedLibraryImport,
   suggestIgnoredProcess,
   persist,
   pollContributions,
   removeGameHistory,
   reportNegativeMatch,
+  revealGameExecutable,
+  resolveCachedProcess,
+  scanProcessesNow,
+  selectAmbiguousMatch,
   selectEmulatorGame,
   shareEmulatorMapping,
+  startEmulatorGame,
   setGamePlaytime,
+  submitLocalLinkToCommunity,
   suggestTrackedGameToCommunity,
   untrackGame,
+  verifyLaunchTargets,
 } from "./tracker";
 
 function entry(overrides: Partial<ExeCacheEntry> = {}): ExeCacheEntry {
@@ -92,6 +124,8 @@ beforeEach(() => {
     platform: "Win32",
   });
   invokeMock.mockReset();
+  openMock.mockReset();
+  resetEmulatorLaunchGuardForTests();
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "set_user_ignored_process") {
       return {
@@ -109,6 +143,16 @@ beforeEach(() => {
   });
   useAppStore.setState({
     exeCache: new Map(),
+    libraryImports: new Map(),
+    libraryInstalls: new Map(),
+    scopedExeLinks: new Map(),
+    launchTargets: new Map(),
+    manualLaunchTargets: new Map(),
+    emulatorAutoBinaries: new Map(),
+    emulatorManualBinaries: new Map(),
+    emulatorAutoLaunchTargets: new Map(),
+    emulatorManualLaunchTargets: new Map(),
+    emulatorLaunchCandidates: new Map(),
     activeSessions: [],
     ambiguousMatches: [],
     emulatorMappings: new Map(),
@@ -122,6 +166,7 @@ beforeEach(() => {
     ignoredProcesses: new Set(),
     userIgnoredProcesses: new Set(),
     installUuid: null,
+    installPresenceMarker: null,
     contributionOwnerUuid: null,
     seenContributionStatus: {},
     contributionCounts: {
@@ -138,6 +183,7 @@ beforeEach(() => {
     },
     notifications: [],
     toasts: [],
+    runtimeLog: [],
     awardedMilestones: [],
     milestonesInitializedAt: null,
     suppressStartupNotificationsOnce: false,
@@ -147,6 +193,1859 @@ beforeEach(() => {
       checkedAt: "2026-08-09T00:00:00.000Z",
       detail: null,
     },
+    settings: {
+      ...useAppStore.getState().settings,
+      rememberLaunchPaths: true,
+      gameLaunchingEnabled: true,
+      controllerNavigationEnabled: false,
+    },
+  });
+});
+
+describe("persisted library imports", () => {
+  it("accepts an Xbox import with unknown provider playtime", () => {
+    expect(
+      normalizePersistedLibraryImport({
+        provider: "xbox",
+        externalId: "1234",
+        igdbId: 133430,
+        gameId: 42,
+        source: "igdb",
+        name: "Forza Horizon 5",
+        coverUrl: "cover",
+        importedAt: "2026-09-01T00:00:00.000Z",
+        providerSeconds: null,
+        lastReadAt: "2026-09-01T00:00:00.000Z",
+        linkedExeNames: [],
+      }),
+    ).toMatchObject({
+      provider: "xbox",
+      externalId: "1234",
+      providerSeconds: null,
+    });
+  });
+
+  it("restores a source badge for legacy imports with an executable", () => {
+    expect(
+      normalizePersistedLibraryImport({
+        provider: "steam",
+        externalId: "1232580",
+        igdbId: 131645,
+        gameId: 9002,
+        source: "igdb",
+        name: "Knock on the Coffin Lid",
+        coverUrl: "cover",
+        importedAt: "2026-08-30T14:56:31.380Z",
+        providerSeconds: 6000,
+        lastReadAt: "2026-08-30T14:56:31.380Z",
+        linkedExeNames: ["Knock.exe"],
+      }),
+    ).toMatchObject({
+      linkedExeNames: ["knock.exe"],
+      linkedExeSources: ["igdb"],
+    });
+  });
+
+  it("hydrates Xbox installs and scoped executable links", () => {
+    vi.mocked(localStorage.getItem).mockReturnValue(
+      JSON.stringify({
+        settings: {
+          rememberLaunchPaths: true,
+          gameLaunchingEnabled: true,
+        },
+        awardedMilestones: [],
+        autoDetectedGameKeys: [],
+        libraryInstalls: [
+          {
+            provider: "xbox",
+            externalId: "1234",
+            installPath: String.raw`C:\XboxGames\Example Game\Content`,
+            scannedAt: "2026-09-02T00:00:00.000Z",
+          },
+        ],
+        scopedExeLinks: [
+          {
+            exeName: "Game.exe",
+            pathPrefix: String.raw`c:\xboxgames\example game\content`,
+            gameId: 42,
+            source: "custom",
+            igdbId: 133430,
+            gameName: "Example Game",
+            coverUrl: "cover",
+            provider: "xbox",
+            externalId: "1234",
+            setAt: "2026-09-02T00:00:00.000Z",
+          },
+        ],
+      }),
+    );
+
+    hydrate();
+
+    expect([...useAppStore.getState().libraryInstalls.values()]).toEqual([
+      expect.objectContaining({ provider: "xbox", externalId: "1234" }),
+    ]);
+    expect([...useAppStore.getState().scopedExeLinks.values()]).toEqual([
+      expect.objectContaining({
+        provider: "xbox",
+        externalId: "1234",
+        exeName: "Game.exe",
+      }),
+    ]);
+  });
+
+  it("repairs an upgraded Xbox suggestion to community-only provenance", () => {
+    vi.mocked(localStorage.getItem).mockReturnValue(
+      JSON.stringify({
+        settings: {
+          rememberLaunchPaths: true,
+          gameLaunchingEnabled: true,
+        },
+        awardedMilestones: [],
+        autoDetectedGameKeys: [],
+        libraryImports: [
+          {
+            provider: "xbox",
+            externalId: "1234",
+            igdbId: 133430,
+            gameId: 9,
+            source: "igdb",
+            name: "Example Game",
+            coverUrl: "cover",
+            importedAt: "2026-09-02T00:00:00.000Z",
+            providerSeconds: 0,
+            lastReadAt: "2026-09-02T00:00:00.000Z",
+            linkedExeNames: ["Game.exe"],
+            linkedExeSources: ["custom"],
+          },
+        ],
+        exeCache: [
+          {
+            exeName: "Game.exe",
+            state: "matched",
+            gameId: 42,
+            igdbId: 133430,
+            gameName: "Example Game",
+            coverUrl: "cover",
+            source: "community",
+            lastCheckedAt: "2026-09-02T00:00:00.000Z",
+            communitySuggestionId: 42,
+            communitySuggestionVerified: true,
+            communitySuggestionStatus: "verified",
+          },
+        ],
+      }),
+    );
+
+    hydrate();
+
+    const state = useAppStore.getState();
+    expect(state.exeCache.get("game.exe")).toMatchObject({
+      source: "community",
+      identifierSource: "community",
+    });
+    expect(state.libraryImports.get("xbox:1234")?.linkedExeSources).toEqual([
+      "community",
+    ]);
+    expect(state.scopedExeLinks.size).toBe(0);
+  });
+});
+describe("Steam AppID executable decisions", () => {
+  it("uses Knock.exe from the resolved Steam game without a picker query", () => {
+    const commit = buildLibraryImportCommit({
+      scanned: {
+        externalId: "1232580",
+        name: "Knock on the Coffin Lid",
+        playtimeSeconds: 6_000,
+        installed: false,
+        executables: [],
+      },
+      resolved: {
+        key: "steam:1232580",
+        status: "resolved",
+        game: {
+          id: 9002,
+          igdbId: 131645,
+          name: "Knock on the Coffin Lid",
+          coverUrl: "cover",
+          source: "igdb",
+        },
+        executables: [
+          {
+            platform: "windows",
+            kind: "exe",
+            value: "knock.exe",
+            provenance: "igdb",
+            verified: true,
+            ambiguous: true,
+          },
+        ],
+      },
+      now: "2026-09-02T00:00:00.000Z",
+    });
+    const cached = commit?.exeCacheEntries[0];
+    expect(cached).toBeDefined();
+    if (!cached) return;
+
+    expect(
+      resolveCachedProcess(
+        { exeName: "Knock.exe", exePath: null },
+        new Map([["knock.exe", cached]]),
+        new Map(),
+        Date.now(),
+        30 * 24 * 60 * 60 * 1_000,
+      ),
+    ).toEqual({
+      state: "matched",
+      via: "cache",
+      game: {
+        id: 9002,
+        igdbId: 131645,
+        name: "Knock on the Coffin Lid",
+        coverUrl: "cover",
+        source: "igdb",
+      },
+    });
+  });
+  it("backfills the local Knock.exe decision for an existing import", () => {
+    const imported = normalizePersistedLibraryImport({
+      provider: "steam",
+      externalId: "1232580",
+      igdbId: 131645,
+      gameId: 9002,
+      source: "igdb",
+      name: "Knock on the Coffin Lid",
+      coverUrl: "cover",
+      importedAt: "2026-08-30T14:56:31.380Z",
+      providerSeconds: 6_000,
+      lastReadAt: "2026-08-30T14:56:31.380Z",
+      linkedExeNames: ["knock.exe"],
+    });
+    expect(imported).not.toBeNull();
+    if (!imported) return;
+    const cache = new Map<string, ExeCacheEntry>();
+
+    expect(backfillLibraryExecutableCache(cache, [imported])).toBe(true);
+    expect(
+      resolveCachedProcess(
+        { exeName: "Knock.exe", exePath: null },
+        cache,
+        new Map(),
+        Date.now(),
+        30 * 24 * 60 * 60 * 1_000,
+      ),
+    ).toMatchObject({
+      state: "matched",
+      via: "cache",
+      game: { id: 9002, igdbId: 131645, name: "Knock on the Coffin Lid" },
+    });
+  });
+
+  it("does not create a global backfill over a scoped library link", () => {
+    const imported = normalizePersistedLibraryImport({
+      provider: "xbox",
+      externalId: "1234",
+      igdbId: 133430,
+      gameId: 9,
+      source: "igdb",
+      name: "Example Game",
+      coverUrl: "cover",
+      importedAt: "2026-09-02T00:00:00.000Z",
+      providerSeconds: 0,
+      lastReadAt: "2026-09-02T00:00:00.000Z",
+      linkedExeNames: ["Game.exe"],
+      linkedExeSources: ["custom"],
+    });
+    expect(imported).not.toBeNull();
+    if (!imported) return;
+    const cache = new Map<string, ExeCacheEntry>();
+
+    expect(
+      backfillLibraryExecutableCache(
+        cache,
+        [imported],
+        [
+          {
+            exeName: "Game.exe",
+            pathPrefix: String.raw`c:\xboxgames\example game\content`,
+            gameId: 42,
+            source: "community",
+            identifierSource: "community",
+            igdbId: 133430,
+            gameName: "Example Game",
+            coverUrl: "cover",
+            provider: "xbox",
+            externalId: "1234",
+            setAt: "2026-09-02T00:00:00.000Z",
+          },
+        ],
+      ),
+    ).toBe(false);
+    expect(cache.size).toBe(0);
+  });
+});
+
+describe("provider-scoped library cleanup", () => {
+  const imported = (
+    provider: LibraryImportEntry["provider"],
+    externalId: string,
+    gameId: number,
+    exeName: string,
+  ): LibraryImportEntry => ({
+    provider,
+    externalId,
+    igdbId: gameId + 1_000,
+    gameId,
+    source: "igdb",
+    name: `${provider} game`,
+    coverUrl: "cover",
+    importedAt: "2026-09-02T00:00:00.000Z",
+    providerSeconds: 3_600,
+    lastReadAt: "2026-09-02T00:00:00.000Z",
+    linkedExeNames: [exeName],
+    linkedExeSources: ["igdb"],
+  });
+
+  it("forgets one provider without removing the other or recorded sessions", () => {
+    const steam = imported("steam", "10", 1, "SteamGame.exe");
+    const xbox = imported("xbox", "20", 2, "XboxGame.exe");
+    const session: Session = {
+      id: 1,
+      gameId: 2,
+      igdbId: xbox.igdbId,
+      gameName: xbox.name,
+      source: "igdb",
+      exeName: "XboxGame.exe",
+      startedAt: "2026-09-02T00:00:00.000Z",
+      endedAt: "2026-09-02T01:00:00.000Z",
+      durationSeconds: 3_600,
+    };
+    useAppStore.setState({
+      libraryImports: new Map([
+        ["steam:10", steam],
+        ["xbox:20", xbox],
+      ]),
+      libraryInstalls: new Map([
+        [
+          "steam:10",
+          {
+            provider: "steam",
+            externalId: "10",
+            installPath: String.raw`C:\Steam\SteamGame`,
+            scannedAt: "2026-09-02T00:00:00.000Z",
+          },
+        ],
+      ]),
+      scopedExeLinks: new Map([
+        [
+          "steamgame.exe|c:\\steam\\steamgame",
+          {
+            exeName: "SteamGame.exe",
+            pathPrefix: String.raw`c:\steam\steamgame`,
+            gameId: steam.gameId,
+            source: "igdb",
+            identifierSource: "igdb",
+            igdbId: steam.igdbId,
+            gameName: steam.name,
+            coverUrl: steam.coverUrl,
+            provider: "steam",
+            externalId: steam.externalId,
+            setAt: steam.lastReadAt,
+          },
+        ],
+      ]),
+      exeCache: new Map([
+        [
+          "steamgame.exe",
+          entry({
+            exeName: "SteamGame.exe",
+            gameId: steam.gameId,
+            igdbId: steam.igdbId,
+            source: "igdb",
+            libraryProvider: "steam",
+            libraryExternalId: steam.externalId,
+          }),
+        ],
+        [
+          "xboxgame.exe",
+          entry({
+            exeName: "XboxGame.exe",
+            gameId: xbox.gameId,
+            igdbId: xbox.igdbId,
+            source: "igdb",
+            libraryProvider: "xbox",
+            libraryExternalId: xbox.externalId,
+          }),
+        ],
+      ]),
+      launchTargets: new Map([
+        [
+          "steamgame.exe",
+          {
+            exeName: "SteamGame.exe",
+            path: String.raw`C:\Steam\SteamGame\SteamGame.exe`,
+            owner: { gameId: steam.gameId, source: "igdb" },
+          },
+        ],
+        [
+          "xboxgame.exe",
+          {
+            exeName: "XboxGame.exe",
+            path: String.raw`C:\Xbox\XboxGame.exe`,
+            owner: { gameId: xbox.gameId, source: "igdb" },
+          },
+        ],
+      ]),
+      recentSessions: [session],
+    });
+
+    forgetImportedLibraryData("steam");
+
+    let state = useAppStore.getState();
+    expect([...state.libraryImports.keys()]).toEqual(["xbox:20"]);
+    expect(state.libraryInstalls.size).toBe(0);
+    expect(state.scopedExeLinks.size).toBe(0);
+    expect([...state.exeCache.keys()]).toEqual(["xboxgame.exe"]);
+    expect([...state.launchTargets.keys()]).toEqual(["xboxgame.exe"]);
+    expect(state.recentSessions).toEqual([session]);
+
+    forgetImportedLibraryData("xbox");
+
+    state = useAppStore.getState();
+    expect(state.libraryImports.size).toBe(0);
+    expect(state.exeCache.size).toBe(0);
+    expect(state.launchTargets.size).toBe(0);
+    expect(state.recentSessions).toEqual([session]);
+  });
+});
+
+describe("tracker request deadlines", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function stalledBody(_input: RequestInfo | URL, init?: RequestInit) {
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: () =>
+        new Promise((_resolve, reject) => {
+          init!.signal!.addEventListener(
+            "abort",
+            () => reject(init!.signal!.reason),
+            { once: true },
+          );
+        }),
+    } as Response);
+  }
+
+  it("times out a stalled match lookup body", async () => {
+    vi.stubGlobal("fetch", vi.fn(stalledBody));
+    const lookup = findGameMatches("Game.exe");
+    const assertion = expect(lookup).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    await vi.advanceTimersByTimeAsync(8_000);
+    await assertion;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("releases the scan queue after a stalled body and tracks the next result", async () => {
+    invokeMock.mockResolvedValue([{ exeName: "Game.exe", exePath: null }]);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(stalledBody)
+      .mockResolvedValueOnce(
+        Response.json({
+          matches: [
+            {
+              key: "game.exe",
+              game: { id: 42, name: "Game", source: "igdb", coverUrl: "" },
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const first = scanProcessesNow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const queued = scanProcessesNow();
+    await vi.advanceTimersByTimeAsync(8_000);
+    await Promise.all([first, queued]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "scan_processes"),
+    ).toHaveLength(2);
+    expect(useAppStore.getState().activeSessions[0]?.gameId).toBe(42);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("times out a stalled health body and can reconnect on the next check", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(stalledBody)
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const health = checkBackendHealth();
+    await vi.advanceTimersByTimeAsync(2_500);
+    await health;
+    expect(useAppStore.getState().backendHealth).toMatchObject({
+      status: "offline",
+      detail: "Health check timed out",
+    });
+    await checkBackendHealth();
+    expect(useAppStore.getState().backendHealth.status).toBe("online");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("same-name process instances", () => {
+  it.each([true, false])(
+    "tracks and ends path-scoped games independently (PIDs available: %s)",
+    async (withPids) => {
+      const processes = ["One", "Two"].map((folder, index) => ({
+        exeName: "Game.exe",
+        exePath: `C:\\Games\\${folder}\\Game.exe`,
+        ...(withPids ? { pid: 100 + index } : {}),
+      }));
+      useAppStore.setState({
+        scopedExeLinks: new Map(
+          ["One", "Two"].map((folder, index) => [
+            folder,
+            {
+              exeName: "Game.exe",
+              pathPrefix: `C:\\Games\\${folder}`,
+              gameId: 42 + index,
+              igdbId: 42 + index,
+              gameName: folder,
+              source: "igdb" as const,
+              coverUrl: "cover",
+              provider: "steam" as const,
+              externalId: String(index),
+              setAt: "2026-09-07T00:00:00.000Z",
+            },
+          ]),
+        ),
+      });
+      invokeMock.mockImplementation(async (command: string) =>
+        command === "scan_processes" ? processes : undefined,
+      );
+
+      await scanProcessesNow();
+      expect(useAppStore.getState().processes).toHaveLength(2);
+      expect(
+        useAppStore
+          .getState()
+          .activeSessions.map((session) => session.gameId)
+          .sort(),
+      ).toEqual([42, 43]);
+      expect(useAppStore.getState().exeCache.size).toBe(0);
+      const secondSession = useAppStore
+        .getState()
+        .activeSessions.find((session) => session.gameId === 43)!;
+
+      processes.shift();
+      await scanProcessesNow();
+      expect(useAppStore.getState().activeSessions).toMatchObject([
+        { id: secondSession.id, gameId: 43 },
+      ]);
+    },
+  );
+
+  it.each([null, String.raw`C:\Games\Game.exe`])(
+    "keeps every PID but queries and counts the game once (path: %s)",
+    async (exePath) => {
+      const processes = [100, 101].map((pid) => ({
+        exeName: "Game.exe",
+        exePath,
+        pid,
+      }));
+      invokeMock.mockImplementation(async (command: string) =>
+        command === "scan_processes" ? [...processes, processes[0]] : undefined,
+      );
+      const fetchMock = vi.fn().mockResolvedValue(
+        Response.json({
+          matches: [
+            {
+              key: "game.exe",
+              game: { id: 42, name: "Game", source: "igdb", coverUrl: "" },
+            },
+          ],
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await scanProcessesNow();
+      expect(
+        useAppStore
+          .getState()
+          .processes.map((process) => process.pid)
+          .sort(),
+      ).toEqual([100, 101]);
+      expect(useAppStore.getState().activeSessions).toHaveLength(1);
+      const sessionId = useAppStore.getState().activeSessions[0].id;
+      const matchRequests = fetchMock.mock.calls.filter(([url]) =>
+        String(url).endsWith("/api/match-processes"),
+      );
+      expect(matchRequests).toHaveLength(1);
+      expect(JSON.parse(matchRequests[0][1].body).processes).toEqual([
+        {
+          key: "game.exe",
+          identifiers: [
+            { platform: "windows", kind: "exe", value: "Game.exe" },
+          ],
+        },
+      ]);
+
+      processes.shift();
+      await scanProcessesNow();
+      expect(useAppStore.getState().activeSessions).toMatchObject([
+        { id: sessionId, gameId: 42 },
+      ]);
+    },
+  );
+});
+
+describe("install presence wiring", () => {
+  const installUuid = "550e8400-e29b-41d4-a716-446655440000";
+  const apiEndpoint = "https://api.playcounter.test";
+  it("reports presence after a successful health check and keeps the marker in memory", async () => {
+    useAppStore.setState({
+      installUuid,
+      installPresenceMarker: null,
+      settings: { ...useAppStore.getState().settings, apiEndpoint },
+    });
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, _init?: RequestInit) => {
+        if (String(input).endsWith("/health")) {
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            json: async () => ({ ok: true }),
+          } as Response;
+        }
+        return { ok: true, status: 204, statusText: "No Content" } as Response;
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkBackendHealth();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const presenceCall = fetchMock.mock.calls[1];
+    expect(String(presenceCall[0])).toBe(`${apiEndpoint}/api/install-presence`);
+    expect(JSON.parse(String(presenceCall[1]?.body))).toEqual({
+      installUuid,
+    });
+    expect(useAppStore.getState().installPresenceMarker).toMatchObject({
+      endpoint: apiEndpoint,
+      installUuid,
+      kind: "success",
+    });
+    expect(globalThis.localStorage.setItem).not.toHaveBeenCalled();
+  });
+
+  it("reports again on startup despite a recent persisted heartbeat", async () => {
+    // Hydration pins the endpoint to the configured build environment.
+    hydrate();
+    const startupEndpoint = useAppStore.getState().settings.apiEndpoint;
+    vi.mocked(localStorage.getItem).mockReturnValue(
+      JSON.stringify({
+        installUuid,
+        settings: useAppStore.getState().settings,
+        installPresenceMarker: {
+          endpoint: startupEndpoint,
+          installUuid,
+          kind: "success",
+          sentAt: new Date().toISOString(),
+        },
+      }),
+    );
+    hydrate();
+    expect(useAppStore.getState().installPresenceMarker).toBeNull();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => ({
+      ok: true,
+      status: String(input).endsWith("/health") ? 200 : 204,
+      json: async () => ({ ok: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkBackendHealth();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toBe(
+      `${startupEndpoint}/api/install-presence`,
+    );
+    persist();
+    const saved = JSON.parse(vi.mocked(localStorage.setItem).mock.lastCall![1]);
+    expect(saved.installUuid).toBe(installUuid);
+    expect(saved).not.toHaveProperty("installPresenceMarker");
+  });
+
+  it("renews hourly, retries failed heartbeats, and resumes after a long sleep", async () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.setState({
+        installUuid,
+        settings: { ...useAppStore.getState().settings, apiEndpoint },
+      });
+      let presenceOk = true;
+      const presence = vi.fn(async () => ({
+        ok: presenceOk,
+        status: presenceOk ? 204 : 503,
+      }));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) =>
+          String(input).endsWith("/health")
+            ? { ok: true, json: async () => ({ ok: true }) }
+            : presence(),
+        ),
+      );
+
+      await checkBackendHealth();
+      expect(presence).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(
+        INSTALL_PRESENCE_SUCCESS_COOLDOWN_MS - 1,
+      );
+      await checkBackendHealth();
+      expect(presence).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      presenceOk = false;
+      await checkBackendHealth();
+      expect(presence).toHaveBeenCalledTimes(2);
+      expect(useAppStore.getState().installPresenceMarker?.kind).toBe("retry");
+      expect(useAppStore.getState().backendHealth.status).toBe("online");
+      await checkBackendHealth();
+      expect(presence).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(INSTALL_PRESENCE_RETRY_COOLDOWN_MS);
+      presenceOk = true;
+      await checkBackendHealth();
+      expect(presence).toHaveBeenCalledTimes(3);
+      expect(useAppStore.getState().installPresenceMarker?.kind).toBe(
+        "success",
+      );
+      vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+      await checkBackendHealth();
+      expect(presence).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces concurrent presence requests", async () => {
+    useAppStore.setState({
+      installUuid,
+      settings: { ...useAppStore.getState().settings, apiEndpoint },
+    });
+    let complete!: (value: { ok: boolean; status: number }) => void;
+    const pending = new Promise<{ ok: boolean; status: number }>((resolve) => {
+      complete = resolve;
+    });
+    const presence = vi.fn(() => pending);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).endsWith("/health")
+          ? { ok: true, json: async () => ({ ok: true }) }
+          : presence(),
+      ),
+    );
+    const first = checkBackendHealth();
+    const second = checkBackendHealth();
+    await vi.waitFor(() => expect(presence).toHaveBeenCalledTimes(1));
+    complete({ ok: true, status: 204 });
+    await Promise.all([first, second]);
+    expect(presence).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a fresh marker quiet but bypasses it for a changed endpoint", async () => {
+    useAppStore.setState({
+      installUuid,
+      installPresenceMarker: {
+        endpoint: apiEndpoint,
+        installUuid,
+        sentAt: new Date().toISOString(),
+        kind: "success",
+      },
+      settings: { ...useAppStore.getState().settings, apiEndpoint },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => ({
+      ok: true,
+      status: String(input).endsWith("/health") ? 200 : 204,
+      statusText: "OK",
+      json: async () => ({ ok: true }),
+    })) as ReturnType<typeof vi.fn>;
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkBackendHealth();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    useAppStore.setState({
+      settings: {
+        ...useAppStore.getState().settings,
+        apiEndpoint: "https://other.playcounter.test",
+      },
+    });
+    await checkBackendHealth();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[2][0])).toBe(
+      "https://other.playcounter.test/api/install-presence",
+    );
+  });
+});
+
+describe("game launching", () => {
+  const target = {
+    exeName: "Game.exe",
+    path: String.raw`C:\Games\Game.exe`,
+    owner: { gameId: 42, source: "igdb" as const },
+  };
+
+  it("accepts a differently-named manual launcher", async () => {
+    openMock.mockResolvedValueOnce(String.raw`C:\Games\Launcher.exe`);
+
+    await expect(
+      chooseLaunchTarget(["Game.exe"], target.owner),
+    ).resolves.toMatchObject({
+      exeName: "Launcher.exe",
+      path: String.raw`C:\Games\Launcher.exe`,
+    });
+    expect(useAppStore.getState().launchTargets.size).toBe(0);
+    expect(
+      useAppStore
+        .getState()
+        .manualLaunchTargets.get(manualLaunchTargetKey(target.owner)),
+    ).toMatchObject({ exeName: "Launcher.exe" });
+  });
+
+  it("keeps identical launcher basenames independent between games", async () => {
+    const secondOwner = { gameId: 84, source: "igdb" as const };
+    openMock
+      .mockResolvedValueOnce(String.raw`C:\First\Launcher.exe`)
+      .mockResolvedValueOnce(String.raw`D:\Second\Launcher.exe`);
+
+    await chooseLaunchTarget(["Game.exe"], target.owner);
+    await chooseLaunchTarget(["OtherGame.exe"], secondOwner);
+
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(2);
+    expect(
+      useAppStore
+        .getState()
+        .manualLaunchTargets.get(manualLaunchTargetKey(target.owner))?.path,
+    ).toBe(String.raw`C:\First\Launcher.exe`);
+    expect(
+      useAppStore
+        .getState()
+        .manualLaunchTargets.get(manualLaunchTargetKey(secondOwner))?.path,
+    ).toBe(String.raw`D:\Second\Launcher.exe`);
+  });
+
+  it("replaces and forgets a manual launcher stored under an older alias", async () => {
+    const oldOwner = { gameId: -1, source: "custom" as const };
+    const aliases = [oldOwner, target.owner];
+    useAppStore.getState().setManualLaunchTarget({
+      exeName: "OldLauncher.exe",
+      path: String.raw`C:\Games\OldLauncher.exe`,
+      owner: oldOwner,
+    });
+    openMock.mockResolvedValueOnce(String.raw`C:\Games\NewLauncher.exe`);
+
+    await chooseLaunchTarget(["Game.exe"], target.owner, aliases);
+    const selected = findManualLaunchTarget(
+      aliases,
+      useAppStore.getState().manualLaunchTargets,
+    );
+    expect(selected?.path).toBe(String.raw`C:\Games\NewLauncher.exe`);
+    expect(
+      useAppStore
+        .getState()
+        .manualLaunchTargets.has(manualLaunchTargetKey(oldOwner)),
+    ).toBe(false);
+
+    if (!selected) throw new Error("Expected a manual launcher");
+    forgetManualLaunchTarget(selected.owner);
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(0);
+  });
+
+  it("invokes the native launcher", async () => {
+    const firstTarget = {
+      ...target,
+      path: String.raw`C:\Games\First.exe`,
+    };
+    await launchGame(firstTarget);
+    expect(invokeMock).toHaveBeenCalledWith("launch_executable", {
+      path: firstTarget.path,
+    });
+  });
+
+  it("reveals a saved game executable in Explorer", async () => {
+    await revealGameExecutable(target);
+    expect(invokeMock).toHaveBeenCalledWith("reveal_executable", {
+      path: target.path,
+    });
+  });
+
+  it("launches a Dolphin game with the resolved emulator and content files", async () => {
+    const contentKey = "dolphin:rom:the sims 2.rvz";
+    const mapping = emulatorMapping({
+      contentKey,
+      emulatorId: "dolphin",
+      label: "Dolphin",
+      contentKind: "rom",
+      contentValue: "the sims 2.rvz",
+      display: "The Sims 2.rvz",
+    });
+    const binary = {
+      emulatorId: "dolphin",
+      exePath: String.raw`C:\Emulators\Dolphin.exe`,
+      setAt: "2026-08-24T00:00:00.000Z",
+    };
+    const content = {
+      emulatorId: "dolphin",
+      contentKey,
+      filePath: String.raw`D:\Games\The Sims 2.rvz`,
+      setAt: "2026-08-24T00:00:00.000Z",
+    };
+    useAppStore.setState({
+      emulatorMappings: new Map([[contentKey, mapping]]),
+      emulatorAutoBinaries: new Map([["dolphin", binary]]),
+      emulatorAutoLaunchTargets: new Map([[contentKey, content]]),
+    });
+    invokeMock.mockResolvedValueOnce({ kind: "spawned" });
+
+    await expect(launchEmulatorGame(mapping)).resolves.toEqual({
+      kind: "spawned",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("launch_emulator_content", {
+      request: {
+        emulatorId: "dolphin",
+        exePath: binary.exePath,
+        contentPath: content.filePath,
+      },
+    });
+  });
+
+  describe("starting an emulator game directly", () => {
+    const binary = {
+      emulatorId: "dolphin",
+      exePath: String.raw`C:\Emulators\Dolphin.exe`,
+      setAt: "2026-08-24T00:00:00.000Z",
+    };
+    const pickedFile = String.raw`D:\Games\The Sims 2.rvz`;
+
+    function configureDolphin() {
+      useAppStore.setState({
+        emulatorAutoBinaries: new Map([["dolphin", binary]]),
+      });
+    }
+
+    function configureMappedDolphinGame() {
+      const contentKey = "dolphin:rom:other-game.rvz";
+      const mapping = emulatorMapping({
+        contentKey,
+        emulatorId: "dolphin",
+        label: "Dolphin",
+        contentKind: "rom",
+        contentValue: "other-game.rvz",
+        display: "Other Game.rvz",
+      });
+      useAppStore.setState({
+        emulatorAutoBinaries: new Map([["dolphin", binary]]),
+        emulatorAutoLaunchTargets: new Map([
+          [
+            contentKey,
+            {
+              emulatorId: "dolphin",
+              contentKey,
+              filePath: String.raw`D:\Games\Other Game.rvz`,
+              setAt: "2026-08-24T00:00:00.000Z",
+            },
+          ],
+        ]),
+      });
+      return mapping;
+    }
+
+    it("returns busy before opening the picker when the emulator is guarded", async () => {
+      const mapping = configureMappedDolphinGame();
+      let finishLaunch!: (outcome: {
+        kind: "hostRunning";
+        instanceCount: number;
+      }) => void;
+      invokeMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLaunch = resolve;
+          }),
+      );
+
+      const first = launchEmulatorGame(mapping);
+      await expect(startEmulatorGame("dolphin")).resolves.toEqual({
+        kind: "busy",
+      });
+      expect(openMock).not.toHaveBeenCalled();
+
+      finishLaunch({ kind: "hostRunning", instanceCount: 1 });
+      await first;
+    });
+
+    it("requires direct launching to be enabled", async () => {
+      useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", false);
+
+      await expect(startEmulatorGame("dolphin")).rejects.toThrow("Enable");
+      expect(openMock).not.toHaveBeenCalled();
+    });
+
+    it("requires the emulator program before opening the picker", async () => {
+      await expect(startEmulatorGame("dolphin")).rejects.toThrow(
+        "Start Dolphin once so PlayCounter can find its program automatically",
+      );
+      expect(openMock).not.toHaveBeenCalled();
+    });
+
+    it("re-checks the guard after the picker closes", async () => {
+      const mapping = configureMappedDolphinGame();
+      let concurrentLaunch!: ReturnType<typeof launchEmulatorGame>;
+      let finishLaunch!: (outcome: {
+        kind: "hostRunning";
+        instanceCount: number;
+      }) => void;
+      invokeMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLaunch = resolve;
+          }),
+      );
+      openMock.mockImplementationOnce(() => {
+        concurrentLaunch = launchEmulatorGame(mapping);
+        return Promise.resolve(pickedFile);
+      });
+
+      await expect(startEmulatorGame("dolphin")).resolves.toEqual({
+        kind: "busy",
+      });
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+
+      finishLaunch({ kind: "hostRunning", instanceCount: 1 });
+      await concurrentLaunch;
+    });
+
+    it("rejects an unsupported file type", async () => {
+      configureDolphin();
+      openMock.mockResolvedValueOnce(String.raw`D:\Games\notes.txt`);
+
+      await expect(startEmulatorGame("dolphin")).rejects.toThrow(
+        "Pick a supported Dolphin game file",
+      );
+      expect(invokeMock).not.toHaveBeenCalledWith(
+        "launch_emulator_content",
+        expect.anything(),
+      );
+    });
+
+    it("returns null without launching when the picker is cancelled", async () => {
+      configureDolphin();
+      openMock.mockResolvedValueOnce(null);
+
+      await expect(startEmulatorGame("dolphin")).resolves.toBeNull();
+      expect(invokeMock).not.toHaveBeenCalledWith(
+        "launch_emulator_content",
+        expect.anything(),
+      );
+    });
+
+    it("starts a game directly from a picked file", async () => {
+      configureDolphin();
+      openMock.mockResolvedValueOnce(pickedFile);
+      invokeMock.mockResolvedValueOnce({ kind: "spawned" });
+
+      await expect(startEmulatorGame("dolphin")).resolves.toEqual({
+        kind: "spawned",
+      });
+      expect(openMock).toHaveBeenCalledWith({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Dolphin content",
+            extensions: expect.arrayContaining(["rvz", "iso"]),
+          },
+        ],
+      });
+      expect(invokeMock).toHaveBeenCalledWith("launch_emulator_content", {
+        request: {
+          emulatorId: "dolphin",
+          exePath: binary.exePath,
+          contentPath: pickedFile,
+        },
+      });
+    });
+
+    it("does not record the picked path in runtime diagnostics", async () => {
+      configureDolphin();
+      openMock.mockResolvedValueOnce(pickedFile);
+      invokeMock.mockResolvedValueOnce({ kind: "spawned" });
+
+      await startEmulatorGame("dolphin");
+
+      const messages = useAppStore
+        .getState()
+        .runtimeLog.map((entry) => entry.message);
+      expect(messages.some((message) => message.includes(pickedFile))).toBe(
+        false,
+      );
+      expect(
+        messages.some((message) => message.includes("emulator=dolphin")),
+      ).toBe(true);
+    });
+  });
+
+  it("stores a manually selected Dolphin game file", async () => {
+    const mapping = emulatorMapping({
+      contentKey: "dolphin:title_id:g4op69",
+      emulatorId: "dolphin",
+      label: "Dolphin",
+      contentKind: "title_id",
+      contentValue: "g4op69",
+      display: "The Sims 2: Pets",
+    });
+    openMock.mockResolvedValueOnce(String.raw`D:\Games\The Sims 2 Pets.rvz`);
+
+    await expect(chooseEmulatorLaunchFile(mapping)).resolves.toMatchObject({
+      contentKey: mapping.contentKey,
+      emulatorId: "dolphin",
+      filePath: String.raw`D:\Games\The Sims 2 Pets.rvz`,
+    });
+    expect(
+      useAppStore
+        .getState()
+        .emulatorManualLaunchTargets.get(mapping.contentKey),
+    ).toMatchObject({ filePath: String.raw`D:\Games\The Sims 2 Pets.rvz` });
+  });
+
+  it("requires the launcher feature to be enabled", async () => {
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", false);
+    await expect(launchGame(target)).rejects.toThrow("Enable");
+    expect(invokeMock).not.toHaveBeenCalledWith("launch_executable", {
+      path: target.path,
+    });
+  });
+
+  it("forgets only genuinely missing targets", async () => {
+    useAppStore.getState().setLaunchTarget(target);
+    invokeMock.mockRejectedValueOnce({ kind: "notFound", message: "Gone" });
+    await expect(launchGame(target)).rejects.toMatchObject({
+      kind: "notFound",
+    });
+    expect(useAppStore.getState().launchTargets.has("game.exe")).toBe(false);
+
+    useAppStore.getState().setLaunchTarget(target);
+    invokeMock.mockRejectedValueOnce({
+      kind: "unreadable",
+      message: "Drive unavailable",
+    });
+    await expect(launchGame(target)).rejects.toMatchObject({
+      kind: "unreadable",
+    });
+    expect(useAppStore.getState().launchTargets.get("game.exe")).toEqual(
+      target,
+    );
+
+    invokeMock.mockRejectedValueOnce({
+      kind: "notAFile",
+      message: "Not a program",
+    });
+    await expect(launchGame(target)).rejects.toMatchObject({
+      kind: "notAFile",
+    });
+    expect(useAppStore.getState().launchTargets.has("game.exe")).toBe(false);
+  });
+
+  it("forgets a failed manual launcher without removing the auto target", async () => {
+    const manual = {
+      ...target,
+      exeName: "Launcher.exe",
+      path: String.raw`C:\Games\Launcher.exe`,
+    };
+    useAppStore.getState().setLaunchTarget(target);
+    useAppStore.getState().setManualLaunchTarget(manual);
+    invokeMock.mockRejectedValueOnce({ kind: "notFound", message: "Gone" });
+
+    await expect(launchGame(manual)).rejects.toMatchObject({
+      kind: "notFound",
+    });
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().launchTargets.get("game.exe")).toEqual(
+      target,
+    );
+  });
+
+  it("suppresses concurrent launch requests", async () => {
+    const raceTarget = {
+      ...target,
+      exeName: "Race.exe",
+      path: String.raw`C:\Games\Race.exe`,
+    };
+    let finishLaunch!: () => void;
+    invokeMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishLaunch = resolve)),
+    );
+
+    const first = launchGame(raceTarget);
+    await expect(launchGame(raceTarget)).resolves.toBe("busy");
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    finishLaunch();
+    await expect(first).resolves.toBe("launched");
+  });
+
+  it("captures a resolved process path without churning identical scans", async () => {
+    useAppStore.setState({
+      exeCache: new Map([["game.exe", entry({ gameId: 42, source: "igdb" })]]),
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "Game.exe",
+            exePath: String.raw`C:\Games\Game.exe`,
+            pid: 123,
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+    const first = useAppStore.getState().launchTargets.get("game.exe");
+    expect(first).toEqual(target);
+    await scanProcessesNow();
+    expect(useAppStore.getState().launchTargets.get("game.exe")).toBe(first);
+  });
+
+  it("learns Dolphin.exe and an exact ISO path while launching is disabled", async () => {
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", false);
+    const contentKey = "dolphin:rom:the sims 2.rvz";
+    useAppStore.setState({
+      emulatorMappings: new Map([
+        [
+          contentKey,
+          emulatorMapping({
+            contentKey,
+            emulatorId: "dolphin",
+            label: "Dolphin",
+            contentKind: "rom",
+            contentValue: "the sims 2.rvz",
+            display: "The Sims 2.rvz",
+          }),
+        ],
+      ]),
+    });
+    const exePath = String.raw`C:\Emulators\Dolphin.exe`;
+    const filePath = String.raw`D:\Games\The Sims 2.rvz`;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "Dolphin.exe",
+            exePath,
+            pid: 123,
+            startedAtUnix: 10,
+            emulatorId: "dolphin",
+            commandLine: [`--exec=${filePath}`],
+            windowTitle: null,
+          },
+        ];
+      }
+      if (command === "verify_emulator_content_paths") {
+        return [{ path: filePath, status: "ok" }];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+
+    expect(
+      useAppStore.getState().emulatorAutoBinaries.get("dolphin"),
+    ).toMatchObject({
+      exePath,
+    });
+    expect(
+      useAppStore.getState().emulatorAutoLaunchTargets.get(contentKey),
+    ).toMatchObject({ filePath });
+    expect(useAppStore.getState().emulatorLaunchCandidates.size).toBe(0);
+  });
+
+  it("learns the file opened later in Dolphin without a redundant confirmation", async () => {
+    const contentKey = "dolphin:title_id:g4op69";
+    useAppStore.setState({
+      emulatorMappings: new Map([
+        [
+          contentKey,
+          emulatorMapping({
+            contentKey,
+            emulatorId: "dolphin",
+            label: "Dolphin",
+            contentKind: "title_id",
+            contentValue: "g4op69",
+            display: "The Sims 2: Pets",
+          }),
+        ],
+      ]),
+    });
+    const filePath = String.raw`D:\Games\The Sims 2 Pets.rvz`;
+    let running = true;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return running
+          ? [
+              {
+                exeName: "Dolphin.exe",
+                exePath: String.raw`C:\Emulators\Dolphin.exe`,
+                pid: 123,
+                startedAtUnix: 10,
+                emulatorId: "dolphin",
+                commandLine: [],
+                windowTitle:
+                  "Dolphin 2606 | JIT64 SC | Vulkan | HLE | The Sims 2: Pets (G4OP69)",
+                openFiles: [filePath],
+              },
+            ]
+          : [];
+      }
+      if (command === "verify_emulator_content_paths") {
+        return [{ path: filePath, status: "ok" }];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+
+    expect(
+      useAppStore.getState().emulatorAutoLaunchTargets.get(contentKey),
+    ).toMatchObject({ filePath });
+    expect(useAppStore.getState().emulatorLaunchCandidates.size).toBe(0);
+
+    running = false;
+    await scanProcessesNow();
+    expect(
+      useAppStore.getState().emulatorAutoLaunchTargets.get(contentKey),
+    ).toMatchObject({ filePath });
+    expect(useAppStore.getState().emulatorLaunchCandidates.size).toBe(0);
+  });
+
+  it("uses the existing mapping while a PlayCounter-launched Dolphin window is still starting", async () => {
+    const contentKey = "dolphin:title_id:g4op69";
+    const filePath = String.raw`D:\Games\Sims 2, The - Pets (Europe) (En,Fr,De).rvz`;
+    const mapping = emulatorMapping({
+      contentKey,
+      emulatorId: "dolphin",
+      label: "Dolphin",
+      contentKind: "title_id",
+      contentValue: "g4op69",
+      display: "The Sims 2: Pets",
+      gameName: "The Sims 2: Pets",
+    });
+    useAppStore.setState({
+      emulatorMappings: new Map([[contentKey, mapping]]),
+      emulatorAutoLaunchTargets: new Map([
+        [
+          contentKey,
+          {
+            contentKey,
+            emulatorId: "dolphin",
+            filePath,
+            setAt: "2026-08-24T00:00:00.000Z",
+          },
+        ],
+      ]),
+      emulatorObservations: [
+        {
+          kind: "content",
+          key: "dolphin:rom:sims 2, the - pets (europe) (en,fr,de).rvz",
+          emulatorId: "dolphin",
+          label: "Dolphin",
+          hostExeName: "Dolphin.exe",
+          contentKind: "rom",
+          contentValue: "sims 2, the - pets (europe) (en,fr,de).rvz",
+          display: "Sims 2, The - Pets (Europe) (En,Fr,De).rvz",
+          trust: "recognized",
+          shareable: true,
+          state: "unknown",
+          detectedAt: "2026-08-24T00:00:00.000Z",
+        },
+      ],
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "Dolphin.exe",
+            exePath: String.raw`C:\Emulators\Dolphin.exe`,
+            pid: 123,
+            startedAtUnix: 10,
+            emulatorId: "dolphin",
+            commandLine: ["--batch", `--exec=${filePath}`],
+            windowTitle: null,
+            openFiles: [filePath],
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+
+    expect(useAppStore.getState().emulatorObservations).toEqual([]);
+    expect(useAppStore.getState().activeSessions).toHaveLength(1);
+    expect(useAppStore.getState().activeSessions[0]).toMatchObject({
+      gameName: "The Sims 2: Pets",
+      emulator: {
+        emulatorId: "dolphin",
+        contentKey,
+      },
+    });
+  });
+
+  it("uses the existing mapping while a PlayCounter-launched DOSBox game is still starting", async () => {
+    const contentKey = "dosbox:program:doom";
+    const filePath = String.raw`D:\Games\Doom\DOOM.EXE`;
+    const mapping = emulatorMapping({
+      contentKey,
+      emulatorId: "dosbox",
+      label: "DOSBox",
+      contentKind: "program",
+      contentValue: "doom",
+      display: "DOOM",
+      gameName: "Doom",
+    });
+    useAppStore.setState({
+      emulatorMappings: new Map([[contentKey, mapping]]),
+      emulatorAutoLaunchTargets: new Map([
+        [
+          contentKey,
+          {
+            contentKey,
+            emulatorId: "dosbox",
+            filePath,
+            setAt: "2026-08-24T00:00:00.000Z",
+          },
+        ],
+      ]),
+      emulatorObservations: [
+        {
+          kind: "content",
+          key: "dosbox:program:doom.exe",
+          emulatorId: "dosbox",
+          label: "DOSBox",
+          hostExeName: "DOSBox.exe",
+          contentKind: "program",
+          contentValue: "doom.exe",
+          display: "DOOM.EXE",
+          trust: "recognized",
+          shareable: true,
+          state: "unknown",
+          detectedAt: "2026-08-24T00:00:00.000Z",
+        },
+      ],
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "DOSBox.exe",
+            exePath: String.raw`C:\Emulators\DOSBox.exe`,
+            pid: 123,
+            startedAtUnix: 10,
+            emulatorId: "dosbox",
+            commandLine: [filePath, "-exit"],
+            windowTitle: null,
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+
+    expect(useAppStore.getState().emulatorObservations).toEqual([]);
+    expect(useAppStore.getState().activeSessions).toHaveLength(1);
+    expect(useAppStore.getState().activeSessions[0]).toMatchObject({
+      gameName: "Doom",
+      emulator: {
+        emulatorId: "dosbox",
+        contentKey,
+      },
+    });
+  });
+
+  it("learns a relative DOSBox program from the process working directory", async () => {
+    const contentKey = "dosbox:program:wolf3d";
+    const workingDirectory = String.raw`C:\Users\phili\Downloads\dosbox\wolf3d`;
+    const filePath = `${workingDirectory}\\WOLF3D.EXE`;
+    useAppStore.setState({
+      emulatorMappings: new Map([
+        [
+          contentKey,
+          emulatorMapping({
+            contentKey,
+            emulatorId: "dosbox",
+            label: "DOSBox",
+            contentKind: "program",
+            contentValue: "wolf3d",
+            display: "WOLF3D",
+            gameName: "Wolfenstein 3D",
+          }),
+        ],
+      ]),
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "DOSBox.exe",
+            exePath: String.raw`C:\Program Files (x86)\DOSBox-0.74-3\DOSBox.exe`,
+            pid: 123,
+            startedAtUnix: 10,
+            emulatorId: "dosbox",
+            commandLine: ["WOLF3D.EXE", "--exit"],
+            workingDirectory,
+            windowTitle:
+              "DOSBox 0.74-3, Cpu speed: max 100% cycles, Frameskip 0, Program: WOLF3D",
+          },
+        ];
+      }
+      if (command === "verify_emulator_content_paths") {
+        return [{ path: filePath, status: "ok" }];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+
+    expect(
+      useAppStore.getState().emulatorAutoLaunchTargets.get(contentKey),
+    ).toMatchObject({ filePath });
+    expect(useAppStore.getState().emulatorLaunchCandidates.size).toBe(0);
+  });
+
+  it("does not learn executable paths from temporary folders", async () => {
+    useAppStore.setState({
+      exeCache: new Map([
+        ["gg5.exe", entry({ exeName: "gg5.exe", gameId: 42, source: "igdb" })],
+      ]),
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "gg5.exe",
+            exePath: String.raw`C:\Users\Me\AppData\Local\Temp\extract\gg5.exe`,
+            pid: 123,
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+    expect(useAppStore.getState().launchTargets.has("gg5.exe")).toBe(false);
+  });
+
+  it("learns executable paths while launching is disabled", async () => {
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", false);
+    useAppStore.setState({
+      exeCache: new Map([["game.exe", entry({ gameId: 42, source: "igdb" })]]),
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "Game.exe",
+            exePath: target.path,
+            pid: 123,
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+    expect(useAppStore.getState().launchTargets.get("game.exe")).toEqual(
+      target,
+    );
+  });
+
+  it("does not learn executable paths when path storage is disabled", async () => {
+    useAppStore.getState().setLauncherSetting("rememberLaunchPaths", false);
+    useAppStore.setState({
+      exeCache: new Map([["game.exe", entry({ gameId: 42, source: "igdb" })]]),
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "scan_processes") {
+        return [
+          {
+            exeName: "Game.exe",
+            exePath: target.path,
+            pid: 123,
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    await scanProcessesNow();
+    expect(useAppStore.getState().launchTargets.size).toBe(0);
+  });
+
+  it("prunes verified missing targets but keeps inaccessible ones", async () => {
+    const inaccessible = {
+      ...target,
+      exeName: "NetworkGame.exe",
+      path: String.raw`Z:\Games\NetworkGame.exe`,
+    };
+    useAppStore.getState().setLaunchTarget(target);
+    useAppStore.getState().setLaunchTarget(inaccessible);
+    invokeMock.mockResolvedValueOnce([
+      { path: target.path, status: "missing" },
+      { path: inaccessible.path, status: "unreadable" },
+    ]);
+
+    await expect(verifyLaunchTargets("test")).resolves.toBe(1);
+    expect(useAppStore.getState().launchTargets.has("game.exe")).toBe(false);
+    expect(useAppStore.getState().launchTargets.get("networkgame.exe")).toEqual(
+      inaccessible,
+    );
+  });
+
+  it("prunes stale manual launchers independently", async () => {
+    const manual = {
+      ...target,
+      exeName: "Launcher.exe",
+      path: String.raw`C:\Games\Launcher.exe`,
+    };
+    useAppStore.getState().setLaunchTarget(target);
+    useAppStore.getState().setManualLaunchTarget(manual);
+    invokeMock.mockResolvedValueOnce([
+      { path: target.path, status: "ok" },
+      { path: manual.path, status: "missing" },
+    ]);
+
+    await expect(verifyLaunchTargets("manual-test")).resolves.toBe(1);
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().launchTargets.get("game.exe")).toEqual(
+      target,
+    );
+  });
+
+  it("verifies saved paths while launching is disabled", async () => {
+    useAppStore.getState().setLaunchTarget(target);
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", false);
+    invokeMock.mockResolvedValueOnce([{ path: target.path, status: "ok" }]);
+
+    await expect(verifyLaunchTargets("test-disabled")).resolves.toBe(0);
+    expect(invokeMock).toHaveBeenCalledWith("verify_launch_paths", {
+      paths: [target.path],
+    });
+    expect(useAppStore.getState().launchTargets.get("game.exe")).toEqual(
+      target,
+    );
+  });
+
+  it("does not verify paths when path storage is disabled", async () => {
+    useAppStore.getState().setLauncherSetting("rememberLaunchPaths", false);
+    useAppStore.setState({
+      launchTargets: new Map([["game.exe", target]]),
+    });
+
+    await expect(verifyLaunchTargets("test-storage-disabled")).resolves.toBe(0);
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "verify_launch_paths",
+      expect.anything(),
+    );
+  });
+
+  it("captures an ambiguous executable for only the selected local game", () => {
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", false);
+    useAppStore.setState({
+      ambiguousMatches: [
+        {
+          exeName: "Mixtape.exe",
+          exePath: String.raw`C:\Games\Mixtape.exe`,
+          candidates: [],
+          detectedAt: "2026-08-20T10:00:00.000Z",
+          endedAt: "2026-08-20T10:01:00.000Z",
+        },
+      ],
+    });
+
+    selectAmbiguousMatch("Mixtape.exe", {
+      id: 7,
+      name: "Mixtape",
+      coverUrl: "cover",
+      source: "igdb",
+    });
+
+    expect(useAppStore.getState().launchTargets.get("mixtape.exe")).toEqual({
+      exeName: "Mixtape.exe",
+      path: String.raw`C:\Games\Mixtape.exe`,
+      owner: { gameId: 7, source: "igdb" },
+    });
+  });
+
+  it("does not retain an ambiguous executable when path storage is disabled", () => {
+    useAppStore.getState().setLauncherSetting("rememberLaunchPaths", false);
+    useAppStore.setState({
+      ambiguousMatches: [
+        {
+          exeName: "Mixtape.exe",
+          exePath: String.raw`C:\Games\Mixtape.exe`,
+          candidates: [],
+          detectedAt: "2026-08-20T10:00:00.000Z",
+          endedAt: "2026-08-20T10:01:00.000Z",
+        },
+      ],
+    });
+
+    selectAmbiguousMatch("Mixtape.exe", {
+      id: 7,
+      name: "Mixtape",
+      coverUrl: "cover",
+      source: "igdb",
+    });
+
+    expect(useAppStore.getState().launchTargets.size).toBe(0);
+  });
+});
+
+describe("local library reset", () => {
+  it("clears every library data source and preserves app identity and preferences", () => {
+    const settings = useAppStore.getState().settings;
+    const completedSession: Session = {
+      id: 1,
+      gameId: 42,
+      gameName: "Doom 3",
+      coverUrl: "cover",
+      source: "igdb",
+      exeName: "Doom3.exe",
+      startedAt: "2026-08-20T09:00:00.000Z",
+      endedAt: "2026-08-20T10:00:00.000Z",
+      durationSeconds: 3600,
+    };
+
+    useAppStore.setState({
+      installUuid: "install-id",
+      settings,
+      blacklist: new Set(["ignored.exe"]),
+      contributionCounts: {
+        suggested: 2,
+        verified: 1,
+        pending: 0,
+        rejected: 1,
+      },
+      knownEmulators: new Map([
+        [
+          "dosbox",
+          {
+            emulatorId: "dosbox",
+            label: "DOSBox",
+            firstSeenAt: "2026-08-20T09:00:00.000Z",
+            lastSeenAt: "2026-08-20T10:00:00.000Z",
+            hostExeNames: ["dosbox.exe"],
+          },
+        ],
+      ]),
+      exeCache: new Map([["doom3.exe", entry({ gameId: 42, source: "igdb" })]]),
+      recentSessions: [completedSession],
+      activeSessions: [
+        {
+          id: 2,
+          gameId: 42,
+          gameName: "Doom 3",
+          coverUrl: "cover",
+          source: "igdb",
+          exeName: "Doom3.exe",
+          startedAt: "2026-08-20T11:00:00.000Z",
+          checkpointedAt: "2026-08-20T11:00:00.000Z",
+        },
+      ],
+      ambiguousMatches: [
+        {
+          exeName: "game.exe",
+          exePath: null,
+          candidates: [],
+          detectedAt: "2026-08-20T11:00:00.000Z",
+        },
+      ],
+      emulatorMappings: new Map([
+        ["dosbox:program:doom3.exe", emulatorMapping()],
+      ]),
+      emulatorObservations: [
+        {
+          kind: "host-notice",
+          key: "dosbox:host",
+          emulatorId: "dosbox",
+          label: "DOSBox",
+          hostExeName: "dosbox.exe",
+          reason: "no-signal",
+          detectedAt: "2026-08-20T11:00:00.000Z",
+        },
+      ],
+      gameMetadata: new Map([
+        [
+          "igdb:42",
+          {
+            id: 42,
+            name: "Doom 3",
+            coverUrl: "cover",
+            source: "igdb",
+          },
+        ],
+      ]),
+      archivedSeconds: 7200,
+      archivedGameSeconds: { "igdb:42": 7200 },
+      playtimeAdjustments: { "igdb:42": 600 },
+      autoDetectedGameKeys: ["igdb:42"],
+      manualLaunchTargets: new Map([
+        [
+          "42:igdb",
+          {
+            exeName: "Launcher.exe",
+            path: String.raw`C:\Games\Launcher.exe`,
+            owner: { gameId: 42, source: "igdb" },
+          },
+        ],
+      ]),
+    });
+
+    expect(clearLocalLibrary()).toEqual({
+      matches: 1,
+      sessions: 1,
+      activeSessions: 1,
+      emulatorMappings: 1,
+    });
+
+    const state = useAppStore.getState();
+    expect(state).toMatchObject({
+      installUuid: "install-id",
+      settings,
+      archivedSeconds: 0,
+      archivedGameSeconds: {},
+      playtimeAdjustments: {},
+      autoDetectedGameKeys: [],
+    });
+    expect(state.blacklist).toEqual(new Set(["ignored.exe"]));
+    expect(state.manualLaunchTargets.size).toBe(0);
+    expect(state.contributionCounts).toMatchObject({ verified: 1 });
+    expect(state.knownEmulators.has("dosbox")).toBe(true);
+    expect(state.exeCache.size).toBe(0);
+    expect(state.recentSessions).toEqual([]);
+    expect(state.activeSessions).toEqual([]);
+    expect(state.ambiguousMatches).toEqual([]);
+    expect(state.emulatorMappings.size).toBe(0);
+    expect(state.emulatorObservations).toEqual([]);
+    expect(state.gameMetadata.size).toBe(0);
+    expect(globalThis.localStorage.setItem).toHaveBeenCalled();
   });
 });
 
@@ -1150,6 +3049,43 @@ describe("game metadata hydration", () => {
 });
 
 describe("contribution marker repair", () => {
+  it("updates a scoped custom link without creating a global basename mapping", () => {
+    const key = "game.exe|c:\\steam\\game";
+    const repaired = applyContributionMarkers(
+      {
+        exeCache: new Map(),
+        scopedExeLinks: new Map([
+          [
+            key,
+            {
+              exeName: "game.exe",
+              pathPrefix: "C:\\Steam\\Game",
+              gameId: -42,
+              igdbId: 123,
+              gameName: "Game",
+              coverUrl: "cover",
+              source: "custom" as const,
+              provider: "steam" as const,
+              externalId: "10",
+              setAt: "2026-08-23T00:00:00.000Z",
+              communitySuggestionId: 42,
+              communitySuggestionStatus: "pending" as const,
+            },
+          ],
+        ]),
+      },
+      [contribution({ status: "verified", reviewNote: undefined })],
+    );
+
+    expect(repaired.exeCache.size).toBe(0);
+    expect(repaired.scopedExeLinks.get(key)).toMatchObject({
+      communitySuggestionId: 42,
+      communitySuggestionStatus: "verified",
+      communitySuggestionVerified: true,
+      pathPrefix: "C:\\Steam\\Game",
+    });
+  });
+
   it("repairs the sole matching markerless custom game", () => {
     const repaired = applyContributionMarkers(
       new Map([["game.exe", entry()]]),
@@ -1185,6 +3121,197 @@ describe("contribution marker repair", () => {
       [contribution(), contribution({ gameId: 43 })],
     ).get("game.exe");
     expect(repaired).toBe(existing);
+  });
+});
+
+describe("imported local link sharing", () => {
+  const key = "game.exe|c:\\steam\\game";
+  const link = {
+    exeName: "game.exe",
+    pathPrefix: "C:\\Steam\\Game",
+    gameId: -42,
+    igdbId: 123,
+    gameName: "Game",
+    coverUrl: "cover",
+    source: "custom" as const,
+    identifierSource: "custom" as const,
+    provider: "steam" as const,
+    externalId: "10",
+    setAt: "2026-08-23T00:00:00.000Z",
+    shareState: "unshared" as const,
+  };
+
+  it.each([false, true])(
+    "ignores late sharing replies after import cancellation (reject=%s)",
+    async (reject) => {
+      useAppStore.setState({ scopedExeLinks: new Map([[key, link]]) });
+      const controller = new AbortController();
+      let finish!: () => void;
+      const fetchMock = vi.fn(
+        () =>
+          new Promise<Response>((resolve, fail) => {
+            finish = () =>
+              reject
+                ? fail(new Error("Late failure"))
+                : resolve(
+                    new Response(JSON.stringify({ id: 42, verified: true })),
+                  );
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = submitLocalLinkToCommunity(
+        { kind: "scoped", key },
+        controller.signal,
+      );
+      const assertion = expect(pending).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      controller.abort();
+      finish();
+      await assertion;
+      expect(useAppStore.getState().scopedExeLinks.get(key)).toBe(link);
+    },
+  );
+
+  it("submits the known identity and keeps the resulting marker scoped", async () => {
+    const installUuid = "550e8400-e29b-41d4-a716-446655440000";
+    useAppStore.setState({
+      installUuid,
+      scopedExeLinks: new Map([[key, link]]),
+      settings: {
+        ...useAppStore.getState().settings,
+        apiEndpoint: "https://api.playcounter.test",
+      },
+    });
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: 42, verified: false }), {
+            status: 200,
+          }),
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitLocalLinkToCommunity({ kind: "scoped", key }),
+    ).resolves.toEqual({ kind: "submitted" });
+
+    const state = useAppStore.getState();
+    expect(state.exeCache.has("game.exe")).toBe(false);
+    expect(state.scopedExeLinks.get(key)).toMatchObject({
+      pathPrefix: link.pathPrefix,
+      communitySuggestionId: 42,
+      communitySuggestionStatus: "pending",
+      shareState: undefined,
+    });
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)),
+    ).toEqual({
+      exeName: "game.exe",
+      name: "Game",
+      coverUrl: "cover",
+      igdbId: 123,
+      installUuid,
+    });
+  });
+
+  it("applies a previously approved match without creating a Level up marker", async () => {
+    useAppStore.setState({
+      scopedExeLinks: new Map([[key, link]]),
+      settings: {
+        ...useAppStore.getState().settings,
+        apiEndpoint: "https://api.playcounter.test",
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: 42, verified: true }), {
+            status: 200,
+          }),
+        ),
+      ),
+    );
+
+    await expect(
+      submitLocalLinkToCommunity({ kind: "scoped", key }),
+    ).resolves.toEqual({ kind: "already-known" });
+
+    expect(useAppStore.getState().scopedExeLinks.get(key)).toMatchObject({
+      gameId: 42,
+      igdbId: 123,
+      source: "community",
+      identifierSource: "community",
+      communitySuggestionId: undefined,
+      communitySuggestionVerified: undefined,
+      communitySuggestionStatus: undefined,
+    });
+  });
+
+  it("keeps the local link and exposes retry state when submission fails", async () => {
+    useAppStore.setState({ scopedExeLinks: new Map([[key, link]]) });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+
+    await expect(
+      submitLocalLinkToCommunity({ kind: "scoped", key }),
+    ).resolves.toEqual({ kind: "failed", error: "offline" });
+
+    expect(useAppStore.getState().scopedExeLinks.get(key)).toMatchObject({
+      gameId: -42,
+      igdbId: 123,
+      shareState: "failed",
+    });
+  });
+
+  it("converts an approved scoped suggestion to its community game", () => {
+    const scopedKey = "game.exe|c:\\steam\\game";
+    useAppStore.setState({
+      scopedExeLinks: new Map([
+        [
+          scopedKey,
+          {
+            ...link,
+            communitySuggestionId: 42,
+            communitySuggestionVerified: true,
+            communitySuggestionStatus: "verified" as const,
+          },
+        ],
+      ]),
+      libraryImports: new Map([
+        [
+          "steam:10",
+          {
+            provider: "steam" as const,
+            externalId: "10",
+            igdbId: 123,
+            gameId: 9,
+            source: "igdb" as const,
+            name: "Game",
+            coverUrl: "cover",
+            importedAt: "2026-08-23T00:00:00.000Z",
+            providerSeconds: 0,
+            lastReadAt: "2026-08-23T00:00:00.000Z",
+            linkedExeNames: ["Game.exe"],
+            linkedExeSources: ["custom" as const],
+          },
+        ],
+      ]),
+    });
+
+    convertLocalSuggestionToCommunity("Game.exe");
+
+    expect(useAppStore.getState().scopedExeLinks.get(scopedKey)).toMatchObject({
+      gameId: 42,
+      source: "community",
+      identifierSource: "community",
+      communitySuggestionId: 42,
+      communitySuggestionVerified: true,
+    });
+    expect(
+      useAppStore.getState().libraryImports.get("steam:10")?.linkedExeSources,
+    ).toEqual(["community"]);
   });
 });
 
@@ -1352,6 +3479,11 @@ describe("canonical alias actions", () => {
         ],
       ]),
     });
+    useAppStore.getState().setManualLaunchTarget({
+      exeName: "Launcher.exe",
+      path: String.raw`C:\Games\Launcher.exe`,
+      owner: aliases[1],
+    });
 
     setGamePlaytime({
       gameId: 1,
@@ -1372,6 +3504,7 @@ describe("canonical alias actions", () => {
     expect(useAppStore.getState().exeCache.size).toBe(0);
     expect(useAppStore.getState().recentSessions).toEqual([]);
     expect(useAppStore.getState().playtimeAdjustments).toEqual({});
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(0);
   });
 
   it("stores an archive-aware adjustment without inventing a session", () => {
@@ -1848,5 +3981,353 @@ describe("emulator mapping sharing", () => {
       reason: "not-shareable",
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("community suggestion cancellation", () => {
+  const installUuid = "550e8400-e29b-41d4-a716-446655440000";
+
+  function pendingEntry(
+    exeName: string,
+    suggestionId: number,
+    gameId = -suggestionId,
+  ) {
+    return entry({
+      exeName,
+      gameId,
+      gameName: "Pending Game",
+      communitySuggestionId: suggestionId,
+      communitySuggestionVerified: false,
+      communitySuggestionStatus: "pending",
+      pendingCommunityGame: {
+        id: suggestionId,
+        name: "Pending Game",
+        coverUrl: "cover",
+        source: "community",
+      },
+    });
+  }
+
+  function contributionsResponse(items: Contribution[]) {
+    return new Response(
+      JSON.stringify({
+        items,
+        counts: {
+          suggested: items.length,
+          verified: items.filter((item) => item.status === "verified").length,
+          pending: items.filter((item) => item.status === "pending").length,
+          rejected: items.filter((item) => item.status === "rejected").length,
+        },
+      }),
+      { status: 200 },
+    );
+  }
+
+  it("clears only the exact pending marker and preserves local game data", async () => {
+    const activeSession = {
+      id: 1,
+      gameId: -42,
+      gameName: "Pending Game",
+      exeName: "Mine.exe",
+      coverUrl: "cover",
+      source: "custom" as const,
+      startedAt: "2026-08-23T10:00:00.000Z",
+      checkpointedAt: "2026-08-23T10:01:00.000Z",
+      communitySuggestionId: 42,
+      communitySuggestionStatus: "pending" as const,
+    };
+    const recentSession: Session = {
+      id: 2,
+      gameId: -42,
+      gameName: "Pending Game",
+      exeName: "Mine.exe",
+      coverUrl: "cover",
+      source: "custom",
+      startedAt: "2026-08-22T10:00:00.000Z",
+      endedAt: "2026-08-22T11:00:00.000Z",
+      durationSeconds: 3600,
+      communitySuggestionId: 42,
+      communitySuggestionStatus: "pending",
+    };
+    const sibling = pendingEntry("Sibling.exe", 84, -84);
+    useAppStore.setState({
+      installUuid,
+      exeCache: new Map([
+        ["mine.exe", pendingEntry("Mine.exe", 42)],
+        ["sibling.exe", sibling],
+      ]),
+      activeSessions: [activeSession],
+      recentSessions: [recentSession],
+    });
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify({ status: "cancelled" }), {
+            status: 200,
+          }),
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(cancelCommunitySuggestion("Mine.exe", 42)).resolves.toEqual({
+      kind: "cancelled",
+    });
+
+    const state = useAppStore.getState();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)),
+    ).toEqual({ exeName: "Mine.exe", gameId: 42, installUuid });
+    expect(state.exeCache.get("mine.exe")).toMatchObject({
+      gameId: -42,
+      gameName: "Pending Game",
+      source: "custom",
+    });
+    expect(
+      state.exeCache.get("mine.exe")?.communitySuggestionId,
+    ).toBeUndefined();
+    expect(state.exeCache.get("sibling.exe")).toBe(sibling);
+    expect(state.activeSessions[0]).toMatchObject({
+      gameId: -42,
+      gameName: "Pending Game",
+    });
+    expect(state.activeSessions[0].communitySuggestionId).toBeUndefined();
+    expect(state.recentSessions[0].durationSeconds).toBe(3600);
+    expect(state.recentSessions[0].communitySuggestionId).toBeUndefined();
+  });
+
+  it("does not send a request when the captured game identity is stale", async () => {
+    useAppStore.setState({
+      installUuid,
+      exeCache: new Map([["mine.exe", pendingEntry("Mine.exe", 43)]]),
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(cancelCommunitySuggestion("Mine.exe", 42)).resolves.toEqual({
+      kind: "not-pending",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("cancels only the selected scoped link", async () => {
+    const key = "game.exe|c:\\steam\\one";
+    const siblingKey = "game.exe|c:\\steam\\two";
+    const scoped = (pathPrefix: string, gameId: number) => ({
+      exeName: "game.exe",
+      pathPrefix,
+      gameId: -gameId,
+      igdbId: gameId,
+      gameName: `Game ${gameId}`,
+      coverUrl: "cover",
+      source: "custom" as const,
+      provider: "steam" as const,
+      externalId: String(gameId),
+      setAt: "2026-08-23T00:00:00.000Z",
+      communitySuggestionId: gameId,
+      communitySuggestionStatus: "pending" as const,
+    });
+    const sibling = scoped("C:\\Steam\\Two", 84);
+    useAppStore.setState({
+      installUuid,
+      scopedExeLinks: new Map([
+        [key, scoped("C:\\Steam\\One", 42)],
+        [siblingKey, sibling],
+      ]),
+    });
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify({ status: "cancelled" }), {
+            status: 200,
+          }),
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      cancelCommunitySuggestion({ kind: "scoped", key }, 42),
+    ).resolves.toEqual({ kind: "cancelled" });
+
+    const state = useAppStore.getState();
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)),
+    ).toEqual({ exeName: "game.exe", gameId: 42, installUuid });
+    expect(
+      state.scopedExeLinks.get(key)?.communitySuggestionId,
+    ).toBeUndefined();
+    expect(state.scopedExeLinks.get(siblingKey)).toBe(sibling);
+    expect(state.exeCache.has("game.exe")).toBe(false);
+  });
+
+  it("suppresses stale pending polls until the server confirms absence", async () => {
+    const pending = contribution({
+      value: "Race.exe",
+      gameId: 142,
+      gameName: "Pending Game",
+      status: "pending",
+      reviewNote: undefined,
+    });
+    useAppStore.setState({
+      installUuid,
+      exeCache: new Map([["race.exe", pendingEntry("Race.exe", 142)]]),
+    });
+
+    let resolveOldPoll!: (response: Response) => void;
+    const oldPoll = new Promise<Response>((resolve) => {
+      resolveOldPoll = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => oldPoll)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: "cancelled" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(contributionsResponse([pending]))
+      .mockResolvedValueOnce(contributionsResponse([]))
+      .mockResolvedValueOnce(contributionsResponse([pending]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const inFlightPoll = pollContributions("before cancel");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await cancelCommunitySuggestion("Race.exe", 142);
+    resolveOldPoll(contributionsResponse([pending]));
+    await inFlightPoll;
+    expect(
+      useAppStore.getState().exeCache.get("race.exe")?.communitySuggestionId,
+    ).toBeUndefined();
+
+    await pollContributions("eventually consistent");
+    expect(
+      useAppStore.getState().exeCache.get("race.exe")?.communitySuggestionId,
+    ).toBeUndefined();
+
+    await pollContributions("cancel observed");
+    expect(
+      useAppStore.getState().exeCache.get("race.exe")?.communitySuggestionId,
+    ).toBeUndefined();
+
+    await pollContributions("new pending row");
+    expect(
+      useAppStore.getState().exeCache.get("race.exe")?.communitySuggestionId,
+    ).toBe(142);
+  });
+
+  it("lets an exact successful re-suggestion retire the stale-poll guard", async () => {
+    const pending = contribution({
+      value: "Again.exe",
+      gameId: 242,
+      gameName: "Pending Game",
+      status: "pending",
+      reviewNote: undefined,
+    });
+    useAppStore.setState({
+      installUuid,
+      exeCache: new Map([["again.exe", pendingEntry("Again.exe", 242)]]),
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: "cancelled" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(contributionsResponse([pending]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await cancelCommunitySuggestion("Again.exe", 242);
+    suggestTrackedGameToCommunity(
+      "Again.exe",
+      "Pending Game",
+      "cover",
+      242,
+      false,
+    );
+    await pollContributions("after re-suggestion");
+
+    expect(
+      useAppStore.getState().exeCache.get("again.exe")
+        ?.communitySuggestionStatus,
+    ).toBe("pending");
+  });
+
+  it("handles idempotent, ownership, and no-longer-pending responses", async () => {
+    useAppStore.setState({
+      installUuid,
+      exeCache: new Map([["missing.exe", pendingEntry("Missing.exe", 442)]]),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ status: "not_found" }), {
+            status: 200,
+          }),
+      ),
+    );
+    await expect(
+      cancelCommunitySuggestion("Missing.exe", 442),
+    ).resolves.toEqual({ kind: "cancelled" });
+    expect(
+      useAppStore.getState().exeCache.get("missing.exe")?.communitySuggestionId,
+    ).toBeUndefined();
+
+    useAppStore.setState({
+      exeCache: new Map([["owned.exe", pendingEntry("Owned.exe", 443)]]),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ status: "not_owner" }), {
+            status: 200,
+          }),
+      ),
+    );
+    await expect(cancelCommunitySuggestion("Owned.exe", 443)).resolves.toEqual({
+      kind: "not-owner",
+    });
+    expect(
+      useAppStore.getState().exeCache.get("owned.exe")?.communitySuggestionId,
+    ).toBe(443);
+
+    useAppStore.setState({
+      exeCache: new Map([["reviewed.exe", pendingEntry("Reviewed.exe", 444)]]),
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: "not_pending" }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(contributionsResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      cancelCommunitySuggestion("Reviewed.exe", 444),
+    ).resolves.toEqual({ kind: "not-pending" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(
+      useAppStore.getState().exeCache.get("reviewed.exe")
+        ?.communitySuggestionId,
+    ).toBe(444);
+  });
+
+  it("memoizes an older server that does not support cancellation", async () => {
+    useAppStore.setState({
+      installUuid,
+      exeCache: new Map([
+        ["legacy-one.exe", pendingEntry("Legacy-One.exe", 342)],
+        ["legacy-two.exe", pendingEntry("Legacy-Two.exe", 343)],
+      ]),
+    });
+    const fetchMock = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      cancelCommunitySuggestion("Legacy-One.exe", 342),
+    ).resolves.toEqual({ kind: "unavailable" });
+    await expect(
+      cancelCommunitySuggestion("Legacy-Two.exe", 343),
+    ).resolves.toEqual({ kind: "unavailable" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

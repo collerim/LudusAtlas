@@ -77,3 +77,26 @@ Synchronization date: 2026-08-22 (Asia/Shanghai)
 The GitHub CI and preview workflows run Rust validation and the native Tauri
 NSIS build on Windows, so the locally unavailable native verification remains
 part of the repository gate.
+
+## PlayCounter v1.1.16 synchronization verification
+
+Synchronization date: 2026-09-11 (Asia/Shanghai)
+
+- Upstream: `e7423dbf858dfaeb3b9252d7c47648d403ceef85` (113 commits)
+- Both original LudusAtlas commits retained through a normal merge
+- LudusAtlas identity, version 0.1.0, SQLite plugin, disabled updater, and
+  PlayCounter backup identity isolation retained
+- Upstream public backend removal retained; no local API package remains
+
+| Check                                | Result                                              |
+| ------------------------------------ | --------------------------------------------------- |
+| pnpm 9.15.4 frozen-lockfile install  | passed                                              |
+| Shared and desktop TypeScript checks | passed                                              |
+| Desktop unit tests                   | 65 files, 693 tests passed                          |
+| Shared and Vite frontend builds      | passed                                              |
+| Fork boundary checks                 | passed                                              |
+| Native Rust checks                   | delegated to Windows PR CI; no local Rust toolchain |
+
+Two upstream test expectations were corrected: calendar-day fixtures now use
+local calendar times, and the controller guide assertion follows the current
+Select/View + R1/RB wording. The existing frontend large-chunk warning remains.

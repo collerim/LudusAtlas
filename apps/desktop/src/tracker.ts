@@ -1,5 +1,11 @@
+import { requestJsonResponse, requestWithTimeout } from "./requestJson";
+import { startLibraryImportMatchChecks } from "./library/matchOffers";
+import { initializeHotkeys, disposeHotkeys } from "./hotkeys";
 import type {
   CommunityGameAlias,
+  CommunityGameSuggestionResponse,
+  CommunitySuggestionCancelPayload,
+  CommunitySuggestionCancelResponse,
   Contribution,
   ContributionCounts,
   ContributionStatus,
@@ -8,6 +14,7 @@ import type {
   EmulatorContentSuggestionResponse,
   EmulatorResolveResponse,
   Game,
+  GameSource,
   GameMetadataResponse,
   IdentifierFlagReason,
   IdentifierReportPayload,
@@ -15,6 +22,8 @@ import type {
   IgnoredProcessReportPayload,
   IgnoredProcessReportResponse,
   IgnoredProcessReportStatus,
+  LibraryProviderId,
+  InstallPresencePayload,
   MatchProcessesResponse,
   Platform,
   ProcessIdentifier,
@@ -22,11 +31,13 @@ import type {
   Settings,
 } from "@playcounter/shared";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   useAppStore,
   BUILD_STAGE,
   DEFAULT_API_ENDPOINT,
   canonicalGameKey,
+  canCancelCommunitySuggestion,
   autoDetectionKeys,
   createGameIdentityResolver,
   gameMetadataConflictsWithRef,
@@ -37,8 +48,34 @@ import {
   type AmbiguousProcessMatch,
   type ExeCacheEntry,
   type GameMetadata,
+  type LaunchTarget,
+  type LaunchTargetOwner,
   type ProcessSnapshot,
 } from "./store";
+import {
+  isVolatileLaunchPath,
+  isWindowsExecutablePath,
+  launchErrorKind,
+  launchFileBaseName,
+  manualLaunchTargetKey,
+  shouldForgetLaunchTarget,
+  shouldForgetOnLaunchError,
+  type LaunchOutcome,
+  type LaunchPathReport,
+} from "./gameLaunch";
+import {
+  emulatorTargetCompatibility,
+  isValidEmulatorBinaryPath,
+  isValidEmulatorContentPath,
+  resolveEmulatorBinary,
+  resolveEmulatorLaunchTarget,
+  shouldForgetEmulatorOnLaunchError,
+  shouldForgetEmulatorPath,
+  type EmulatorBinaryEntry,
+  type EmulatorLaunchCandidate,
+  type EmulatorLaunchOutcome,
+  type EmulatorLaunchTarget,
+} from "./emulatorLaunch";
 import { countNeedsReview } from "./discoveredReview";
 import {
   DISCOVERED_REVIEW_REMINDER_ID,
@@ -48,6 +85,7 @@ import {
   sanitizeDiscoveredReviewReminder,
 } from "./discoveredReminder";
 import { matchesProcessPatternSet } from "./ignoredProcessPatterns";
+import { reportInstallPresence } from "./installPresence";
 import { currentPlatform } from "./platform";
 import {
   evaluateMilestones,
@@ -79,6 +117,7 @@ import {
 import { normalizeCollapsedSections } from "./sectionCollapse";
 import { normalizeSessions } from "./sessionPersistence";
 import { normalizeAccentColor } from "./theme";
+import { resolveMyGamesPresentationSettings } from "./ui/myGamesPresentation";
 import { TOURS } from "./ui/tour/tourDefinitions";
 import { normalizeTourProgress } from "./ui/tour/tourState";
 import {
@@ -89,6 +128,11 @@ import {
   noteDiscoveredExecutable,
 } from "./desktopOverlayBridge";
 import { milestoneMetricLabel, pickTopMilestone } from "./desktopOverlays";
+import {
+  armControllerBridge,
+  disposeControllerBridge,
+  initializeControllerBridge,
+} from "./controllerBridge";
 import { adapterFor } from "./emulators/registry";
 import {
   accumulateObservationRuntime,
@@ -96,6 +140,7 @@ import {
   reconcileEmulatorReadings,
 } from "./emulators/resolve";
 import {
+  contentKey,
   GENERIC_IDENTITY_DENYLIST,
   isShareableToken,
 } from "./emulators/signals";
@@ -104,8 +149,30 @@ import {
   type EmulatorShareContext,
 } from "./emulators/share";
 import { toPublicSnapshots } from "./emulators/publicProjection";
+import { customLocalGameId } from "./library/localGameIds";
+import type {
+  LibraryImportEntry,
+  LibraryInstallEntry,
+  ScopedExeLink,
+} from "./library/types";
+import { libraryEntryKey } from "./library/types";
+import { providerFloors } from "./library/playtimeFloor";
+import {
+  normalizeWindowsDir,
+  resolveScopedLink,
+  scopedExeLinkKey,
+} from "./library/scopedLinks";
+import {
+  findLocalLink,
+  findLocalLinksByExe,
+  listLocalLinks,
+  writeLocalLink,
+  type LocalLink,
+  type LocalLinkRef,
+} from "./localLinks";
 import type {
   EmulatorContentObservation,
+  EmulatorContentSignal,
   EmulatorMapping,
   EmulatorMappingShare,
   EmulatorObservation,
@@ -114,7 +181,6 @@ import type {
   RawEmulatorSignals,
 } from "./emulators/types";
 
-const CUSTOM_GAME_ID_BASE = -1_000_000_000;
 const FAKE_HISTORY_GAME_ID_BASE = -900_000_000;
 const FAKE_HISTORY_SESSION_ID_BASE = -900_000_000;
 const FAKE_HISTORY_EXE_PREFIX = "playcounter-fake-";
@@ -125,6 +191,8 @@ const MIN_BACKFILL_SECONDS = 60;
 const BACKEND_HEALTH_INTERVAL_MS = 60_000;
 const BACKEND_HEALTH_TIMEOUT_MS = 2_500;
 const API_REQUEST_TIMEOUT_MS = 8_000;
+// The match-processes API accepts at most 200 lookup items per request.
+const MATCH_PROCESSES_BATCH_SIZE = 200;
 export const PENDING_COMMUNITY_RETRY_MS = 5 * 60 * 1000;
 
 type PersistedState = {
@@ -132,7 +200,17 @@ type PersistedState = {
   contributionOwnerUuid?: string;
   settings?: Partial<Settings>;
   exeCache?: ExeCacheEntry[];
+  launchTargets?: LaunchTarget[];
+  manualLaunchTargets?: LaunchTarget[];
+  emulatorAutoBinaries?: EmulatorBinaryEntry[];
+  emulatorManualBinaries?: EmulatorBinaryEntry[];
+  emulatorAutoLaunchTargets?: EmulatorLaunchTarget[];
+  emulatorManualLaunchTargets?: EmulatorLaunchTarget[];
+  emulatorLaunchCandidates?: EmulatorLaunchCandidate[];
   gameMetadata?: GameMetadata[];
+  libraryImports?: LibraryImportEntry[];
+  libraryInstalls?: LibraryInstallEntry[];
+  scopedExeLinks?: ScopedExeLink[];
   ambiguousMatches?: AmbiguousProcessMatch[];
   emulatorMappings?: EmulatorMapping[];
   emulatorObservations?: EmulatorObservation[];
@@ -222,11 +300,14 @@ const ignoredProcessSuggestionRequests = new Map<
 let initialized = false;
 let backendHealthTimer: number | undefined;
 let contributionsTimer: number | undefined;
+
 let processTimer: number | undefined;
 let trayTimer: number | undefined;
 let unsubscribeTraySync: (() => void) | undefined;
+let stopLibraryImportMatchChecks: (() => void) | undefined;
 let nextSessionSequence = 0;
 let scanInFlight: Promise<void> | undefined;
+let installPresencePingInFlight: Promise<void> | undefined;
 let scanQueued = false;
 let canonicalBackfillDone = false;
 let canonicalBackfillInFlight: Promise<boolean> | undefined;
@@ -237,7 +318,18 @@ let emulatorPrivacy = { userName: "", homeDirName: "" };
 let emulatorPrivacyReady = false;
 let emulatorLookupUnavailableUntil = 0;
 let emulatorSharingUnavailableUntil = 0;
+let communityCancelUnavailableUntil = 0;
+const communitySuggestionCancelGuard = new Map<
+  string,
+  { ref: LocalLinkRef; exeName: string; gameId: number }
+>();
 let lastEmulatorRunningKeys = new Set<string>();
+const launchInFlight = new Map<string, number>();
+const emulatorLaunchInFlight = new Map<string, number>();
+let launchVerificationInFlight: Promise<number> | undefined;
+let lastLaunchVerificationAt = 0;
+const LAUNCH_REENTRY_GUARD_MS = 3_000;
+const LAUNCH_VERIFICATION_THROTTLE_MS = 5 * 60 * 1_000;
 
 const launcherBlacklist = [
   "epicgameslauncher.exe",
@@ -255,6 +347,8 @@ export async function initializeTracker() {
 
   hydrate();
   initializeDesktopOverlays();
+  initializeHotkeys();
+  initializeControllerBridge();
   syncTrayNowPlaying();
   scheduleTraySync();
   unsubscribeTraySync = useAppStore.subscribe((state, previousState) => {
@@ -302,7 +396,8 @@ async function finishTrackerStartup() {
 
   await backfillCanonicalGameIds();
 
-  void closeStaleSession();
+  // Recovery is decided by the next process scan, not by session age. A game
+  // may have kept running for hours while PlayCounter was closed.
   scheduleBackendHealthChecks();
 
   logRuntime("process listener skipped; polling is active");
@@ -319,13 +414,22 @@ async function finishTrackerStartup() {
     trayTimer = undefined;
     unsubscribeTraySync?.();
     unsubscribeTraySync = undefined;
+    stopLibraryImportMatchChecks?.();
+    stopLibraryImportMatchChecks = undefined;
     canonicalBackfillDone = false;
     canonicalBackfillInFlight = undefined;
     canonicalMetadataCheckedIds.clear();
     metadataHydrationRequests.clear();
     emulatorRuntime.clear();
     lastEmulatorRunningKeys.clear();
+    launchInFlight.clear();
+    emulatorLaunchInFlight.clear();
+    launchVerificationInFlight = undefined;
+    installPresencePingInFlight = undefined;
+    lastLaunchVerificationAt = 0;
     disposeDesktopOverlays();
+    disposeHotkeys();
+    disposeControllerBridge();
     initialized = false;
   });
 
@@ -343,6 +447,7 @@ async function finishTrackerStartup() {
       });
       await recheckPendingCommunityApprovals("startup");
       await requestProcessScan("startup");
+      await verifyLaunchTargets("startup");
       if (suppressStartupNotifications) {
         baselineDiscoveredReviewReminder();
         useAppStore.setState({ suppressStartupNotificationsOnce: false });
@@ -350,6 +455,8 @@ async function finishTrackerStartup() {
         logRuntime("post-import notification baseline completed");
       }
       armDesktopOverlays();
+      armControllerBridge();
+      stopLibraryImportMatchChecks = startLibraryImportMatchChecks();
     })();
   }, 1_500);
   if (identityResolved) {
@@ -374,7 +481,172 @@ function applyBuildApiEndpoint(settings: Settings): Settings {
   return { ...settings, apiEndpoint: DEFAULT_API_ENDPOINT };
 }
 
-function hydrate() {
+const positiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value > 0;
+
+const validExternalId = (value: unknown): value is string =>
+  typeof value === "string" && /^[1-9][0-9]{0,9}$/.test(value);
+
+export function normalizePersistedLibraryImport(
+  value: unknown,
+): LibraryImportEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const entry = value as Partial<LibraryImportEntry>;
+  if (
+    (entry.provider !== "steam" && entry.provider !== "xbox") ||
+    !validExternalId(entry.externalId) ||
+    !positiveInteger(entry.igdbId) ||
+    !positiveInteger(entry.gameId) ||
+    (entry.source !== "igdb" && entry.source !== "community") ||
+    typeof entry.name !== "string" ||
+    typeof entry.coverUrl !== "string" ||
+    typeof entry.importedAt !== "string" ||
+    typeof entry.lastReadAt !== "string" ||
+    (entry.providerSeconds !== null &&
+      (typeof entry.providerSeconds !== "number" ||
+        !Number.isFinite(entry.providerSeconds) ||
+        entry.providerSeconds < 0)) ||
+    !Array.isArray(entry.linkedExeNames) ||
+    (entry.linkedExeSources !== undefined &&
+      !Array.isArray(entry.linkedExeSources))
+  ) {
+    return null;
+  }
+  const linkedExeNames = entry.linkedExeNames
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.toLowerCase());
+  const linkedExeSources = Array.isArray(entry.linkedExeSources)
+    ? entry.linkedExeSources.filter(
+        (item): item is GameSource =>
+          item === "igdb" || item === "community" || item === "custom",
+      )
+    : [];
+  if (linkedExeNames.length > 0 && linkedExeSources.length === 0) {
+    linkedExeSources.push(entry.source);
+  }
+  return {
+    ...entry,
+    providerSeconds:
+      entry.providerSeconds === null
+        ? null
+        : Math.round(entry.providerSeconds as number),
+    linkedExeNames,
+    linkedExeSources: [...new Set(linkedExeSources)],
+  } as LibraryImportEntry;
+}
+
+export function backfillLibraryExecutableCache(
+  exeCache: Map<string, ExeCacheEntry>,
+  libraryImports: Iterable<LibraryImportEntry>,
+  scopedExeLinks: Iterable<ScopedExeLink> = [],
+) {
+  let changed = false;
+  const scopedNames = new Set(
+    [...scopedExeLinks].map((entry) => entry.exeName.toLowerCase()),
+  );
+  for (const entry of libraryImports) {
+    const identifierSource = entry.linkedExeSources.includes("igdb")
+      ? "igdb"
+      : entry.linkedExeSources.includes("community")
+        ? "community"
+        : entry.linkedExeSources.includes("custom")
+          ? "custom"
+          : entry.source;
+    for (const exeName of entry.linkedExeNames) {
+      const key = exeName.toLowerCase();
+      const existing = exeCache.get(key);
+      if (existing?.state === "blacklisted") continue;
+      if (existing?.state === "matched" || scopedNames.has(key)) continue;
+      exeCache.set(key, {
+        exeName,
+        state: "matched",
+        gameId: entry.gameId,
+        igdbId: entry.igdbId,
+        gameName: entry.name,
+        coverUrl: entry.coverUrl,
+        source: entry.source,
+        identifierSource,
+        libraryProvider: entry.provider,
+        libraryExternalId: entry.externalId,
+        lastCheckedAt: entry.lastReadAt,
+      });
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function normalizeApprovedCommunityIdentifierSource<
+  T extends {
+    source?: GameSource;
+    identifierSource?: GameSource;
+    communitySuggestionVerified?: boolean;
+    communitySuggestionStatus?: ContributionStatus;
+  },
+>(entry: T): T {
+  return entry.source === "community" &&
+    (entry.identifierSource === undefined ||
+      entry.identifierSource === "custom") &&
+    (entry.communitySuggestionStatus === "verified" ||
+      entry.communitySuggestionVerified === true)
+    ? { ...entry, identifierSource: "community" }
+    : entry;
+}
+
+function reconcileLibraryImportIdentifierSources(
+  libraryImports: Map<string, LibraryImportEntry>,
+  exeCache: ReadonlyMap<string, ExeCacheEntry>,
+  scopedExeLinks: ReadonlyMap<string, ScopedExeLink>,
+) {
+  let changed = false;
+  for (const [key, imported] of libraryImports) {
+    if (!imported.linkedExeSources.includes("custom")) continue;
+    const sources = new Set<GameSource>(
+      imported.linkedExeSources.filter((source) => source !== "custom"),
+    );
+    let unresolvedCustom = false;
+    for (const linkedExeName of imported.linkedExeNames) {
+      const linkedKey = linkedExeName.toLowerCase();
+      const currentSources: GameSource[] = [];
+      const cached = exeCache.get(linkedKey);
+      if (
+        cached?.state === "matched" &&
+        cached.source &&
+        ((cached.libraryProvider === imported.provider &&
+          cached.libraryExternalId === imported.externalId) ||
+          (cached.source === "community" && cached.igdbId === imported.igdbId))
+      ) {
+        currentSources.push(cached.identifierSource ?? cached.source);
+      }
+      for (const scoped of scopedExeLinks.values()) {
+        if (
+          scoped.exeName.toLowerCase() === linkedKey &&
+          scoped.provider === imported.provider &&
+          scoped.externalId === imported.externalId
+        ) {
+          currentSources.push(scoped.identifierSource ?? scoped.source);
+        }
+      }
+      if (currentSources.length === 0) unresolvedCustom = true;
+      else currentSources.forEach((source) => sources.add(source));
+    }
+    if (unresolvedCustom) sources.add("custom");
+    const linkedExeSources = [...sources];
+    if (
+      linkedExeSources.length === imported.linkedExeSources.length &&
+      linkedExeSources.every(
+        (source, index) => source === imported.linkedExeSources[index],
+      )
+    ) {
+      continue;
+    }
+    libraryImports.set(key, { ...imported, linkedExeSources });
+    changed = true;
+  }
+  return changed;
+}
+
+export function hydrate() {
   const hadPersistedStateOnStartup = localStorage.getItem(STORAGE_KEY) !== null;
   const persisted = readPersisted();
   let shouldPersistAchievementMigration =
@@ -389,7 +661,7 @@ function hydrate() {
           (value as Record<string, unknown>).backfilled === true,
       )) ||
     !Array.isArray(persisted.autoDetectedGameKeys);
-  const settings = applyBuildApiEndpoint({
+  const loadedSettings = applyBuildApiEndpoint({
     ...useAppStore.getState().settings,
     ...persisted.settings,
     accentColor: normalizeAccentColor(persisted.settings?.accentColor),
@@ -401,17 +673,238 @@ function hydrate() {
           .filter(Boolean),
       ),
     ],
+    ...resolveMyGamesPresentationSettings(persisted.settings),
   });
+  const settings: Settings =
+    loadedSettings.rememberLaunchPaths === false
+      ? {
+          ...loadedSettings,
+          rememberLaunchPaths: false,
+          gameLaunchingEnabled: false,
+          controllerNavigationEnabled: false,
+        }
+      : loadedSettings.gameLaunchingEnabled === true
+        ? loadedSettings
+        : { ...loadedSettings, controllerNavigationEnabled: false };
+  const rememberLaunchPaths = settings.rememberLaunchPaths !== false;
+  const shouldPersistLaunchPathOptOut =
+    !rememberLaunchPaths &&
+    [
+      persisted.launchTargets,
+      persisted.manualLaunchTargets,
+      persisted.emulatorAutoBinaries,
+      persisted.emulatorManualBinaries,
+      persisted.emulatorAutoLaunchTargets,
+      persisted.emulatorManualLaunchTargets,
+      persisted.emulatorLaunchCandidates,
+    ].some((values) => Array.isArray(values) && values.length > 0);
   const blacklist = persisted.blacklist ?? [];
   const exeCache = persisted.exeCache ?? [];
   const exeCacheMap = new Map(
     exeCache.map((entry) => {
       const { runningSince: _runningSince, ...rest } = entry;
-      return [
-        entry.exeName.toLowerCase(),
+      const normalized = normalizeApprovedCommunityIdentifierSource(
         inferSuggestionStatus(rest),
-      ] as const;
+      );
+      return [entry.exeName.toLowerCase(), normalized] as const;
     }),
+  );
+  function persistedLaunchTarget(value: unknown): LaunchTarget | null {
+    if (!value || typeof value !== "object") return null;
+    const target = value as Partial<LaunchTarget>;
+    const owner = target.owner as Partial<LaunchTargetOwner> | undefined;
+    const source = owner?.source;
+    if (
+      typeof target.exeName !== "string" ||
+      !target.exeName.trim() ||
+      !isWindowsExecutablePath(target.path) ||
+      typeof owner?.gameId !== "number" ||
+      !Number.isFinite(owner.gameId) ||
+      (source !== undefined &&
+        source !== null &&
+        source !== "igdb" &&
+        source !== "community" &&
+        source !== "custom")
+    ) {
+      return null;
+    }
+    return {
+      exeName: target.exeName,
+      path: target.path,
+      owner: { gameId: owner.gameId, source: source ?? null },
+    };
+  }
+  const launchTargets = new Map<string, LaunchTarget>();
+  if (rememberLaunchPaths) {
+    for (const value of persisted.launchTargets ?? []) {
+      const target = persistedLaunchTarget(value);
+      if (target) launchTargets.set(target.exeName.toLowerCase(), target);
+    }
+  }
+  const manualLaunchTargets = new Map<string, LaunchTarget>();
+  if (rememberLaunchPaths) {
+    for (const value of persisted.manualLaunchTargets ?? []) {
+      const target = persistedLaunchTarget(value);
+      if (target) {
+        manualLaunchTargets.set(manualLaunchTargetKey(target.owner), target);
+      }
+    }
+  }
+  function persistedEmulatorBinary(value: unknown): EmulatorBinaryEntry | null {
+    if (!value || typeof value !== "object") return null;
+    const entry = value as Partial<EmulatorBinaryEntry>;
+    if (
+      typeof entry.emulatorId !== "string" ||
+      !adapterFor(entry.emulatorId)?.launch ||
+      !isValidEmulatorBinaryPath(entry.emulatorId, entry.exePath) ||
+      typeof entry.setAt !== "string"
+    ) {
+      return null;
+    }
+    return {
+      emulatorId: entry.emulatorId,
+      exePath: entry.exePath,
+      setAt: entry.setAt,
+    };
+  }
+  function persistedEmulatorTarget(
+    value: unknown,
+  ): EmulatorLaunchTarget | null {
+    if (!value || typeof value !== "object") return null;
+    const target = value as Partial<EmulatorLaunchTarget>;
+    if (
+      typeof target.contentKey !== "string" ||
+      !target.contentKey.startsWith(`${target.emulatorId}:`) ||
+      typeof target.emulatorId !== "string" ||
+      !isValidEmulatorContentPath(target.emulatorId, target.filePath) ||
+      typeof target.setAt !== "string"
+    ) {
+      return null;
+    }
+    return {
+      contentKey: target.contentKey,
+      emulatorId: target.emulatorId,
+      filePath: target.filePath,
+      setAt: target.setAt,
+    };
+  }
+  const hydrateMap = <T>(
+    values: unknown[] | undefined,
+    parse: (value: unknown) => T | null,
+    key: (value: T) => string,
+  ) => {
+    const result = new Map<string, T>();
+    for (const value of values ?? []) {
+      const parsed = parse(value);
+      if (parsed) result.set(key(parsed), parsed);
+    }
+    return result;
+  };
+  const emulatorAutoBinaries = hydrateMap(
+    rememberLaunchPaths ? persisted.emulatorAutoBinaries : undefined,
+    persistedEmulatorBinary,
+    (entry) => entry.emulatorId,
+  );
+  const emulatorManualBinaries = hydrateMap(
+    rememberLaunchPaths ? persisted.emulatorManualBinaries : undefined,
+    persistedEmulatorBinary,
+    (entry) => entry.emulatorId,
+  );
+  const emulatorAutoLaunchTargets = hydrateMap(
+    rememberLaunchPaths ? persisted.emulatorAutoLaunchTargets : undefined,
+    persistedEmulatorTarget,
+    (target) => target.contentKey,
+  );
+  const emulatorManualLaunchTargets = hydrateMap(
+    rememberLaunchPaths ? persisted.emulatorManualLaunchTargets : undefined,
+    persistedEmulatorTarget,
+    (target) => target.contentKey,
+  );
+  const emulatorLaunchCandidates = hydrateMap(
+    rememberLaunchPaths ? persisted.emulatorLaunchCandidates : undefined,
+    (value) => {
+      const target = persistedEmulatorTarget(value);
+      if (!target || !value || typeof value !== "object") return null;
+      const displayName = (value as Partial<EmulatorLaunchCandidate>)
+        .displayName;
+      if (
+        typeof displayName !== "string" ||
+        !displayName.trim() ||
+        displayName !== launchFileBaseName(target.filePath)
+      ) {
+        return null;
+      }
+      return { ...target, displayName };
+    },
+    (candidate) => candidate.contentKey,
+  );
+  const persistedLibraryInstall = (
+    value: unknown,
+  ): LibraryInstallEntry | null => {
+    if (!value || typeof value !== "object") return null;
+    const entry = value as Partial<LibraryInstallEntry>;
+    if (
+      (entry.provider !== "steam" && entry.provider !== "xbox") ||
+      !validExternalId(entry.externalId) ||
+      typeof entry.installPath !== "string" ||
+      !normalizeWindowsDir(entry.installPath) ||
+      typeof entry.scannedAt !== "string"
+    ) {
+      return null;
+    }
+    return entry as LibraryInstallEntry;
+  };
+  const persistedScopedExeLink = (value: unknown): ScopedExeLink | null => {
+    if (!value || typeof value !== "object") return null;
+    const entry = value as Partial<ScopedExeLink>;
+    if (
+      (entry.provider !== "steam" && entry.provider !== "xbox") ||
+      !validExternalId(entry.externalId) ||
+      !positiveInteger(entry.igdbId) ||
+      typeof entry.gameId !== "number" ||
+      !Number.isFinite(entry.gameId) ||
+      !entry.exeName ||
+      typeof entry.pathPrefix !== "string" ||
+      !normalizeWindowsDir(entry.pathPrefix) ||
+      (entry.source !== "igdb" &&
+        entry.source !== "community" &&
+        entry.source !== "custom") ||
+      typeof entry.gameName !== "string" ||
+      typeof entry.coverUrl !== "string" ||
+      typeof entry.setAt !== "string"
+    ) {
+      return null;
+    }
+    return normalizeApprovedCommunityIdentifierSource(entry as ScopedExeLink);
+  };
+  const libraryImports = hydrateMap(
+    persisted.libraryImports,
+    normalizePersistedLibraryImport,
+    (entry) => libraryEntryKey(entry.provider, entry.externalId),
+  );
+  const libraryInstalls = hydrateMap(
+    persisted.libraryInstalls,
+    persistedLibraryInstall,
+    (entry) => libraryEntryKey(entry.provider, entry.externalId),
+  );
+  const scopedExeLinks = hydrateMap(
+    persisted.scopedExeLinks,
+    persistedScopedExeLink,
+    (entry) => scopedExeLinkKey(entry.exeName, entry.pathPrefix)!,
+  );
+  if (
+    reconcileLibraryImportIdentifierSources(
+      libraryImports,
+      exeCacheMap,
+      scopedExeLinks,
+    )
+  ) {
+    shouldPersistAchievementMigration = true;
+  }
+  const backfilledLibraryExecutableCache = backfillLibraryExecutableCache(
+    exeCacheMap,
+    libraryImports.values(),
+    scopedExeLinks.values(),
   );
   const gameMetadataMap = new Map(
     (persisted.gameMetadata ?? []).map((game) => [gameMetadataKey(game), game]),
@@ -430,7 +923,11 @@ function hydrate() {
       ];
     }
     const keys = new Set<string>();
-    const resolver = createGameIdentityResolver(gameMetadataMap, exeCacheMap);
+    const resolver = createGameIdentityResolver(
+      gameMetadataMap,
+      exeCacheMap,
+      libraryImports,
+    );
     for (const session of hydratedSessions) {
       for (const key of autoDetectionKeys(session, resolver)) keys.add(key);
     }
@@ -503,6 +1000,30 @@ function hydrate() {
       return [mapping.contentKey, { ...mapping, share }] as const;
     }),
   );
+  for (const [key, candidate] of [...emulatorLaunchCandidates]) {
+    const mapping = emulatorMappings.get(key);
+    if (!mapping || mapping.decision !== "game") continue;
+    const compatibility = emulatorTargetCompatibility(
+      mapping,
+      candidate.filePath,
+    );
+    if (!compatibility.valid || compatibility.association !== "proven") {
+      continue;
+    }
+    if (
+      !emulatorAutoLaunchTargets.has(key) &&
+      !emulatorManualLaunchTargets.has(key)
+    ) {
+      emulatorAutoLaunchTargets.set(key, {
+        contentKey: candidate.contentKey,
+        emulatorId: candidate.emulatorId,
+        filePath: candidate.filePath,
+        setAt: candidate.setAt,
+      });
+    }
+    emulatorLaunchCandidates.delete(key);
+    shouldPersistAchievementMigration = true;
+  }
   const persistedSeenContributionStatus =
     persisted.seenContributionStatus ?? {};
   const seededSeenContributionStatus = seedEmulatorSeenStatus(
@@ -515,12 +1036,24 @@ function hydrate() {
   );
   useAppStore.setState({
     installUuid: persisted.installUuid ?? null,
+    // Presence cooldowns belong to this run, so every startup reports again.
+    installPresenceMarker: null,
     contributionOwnerUuid: persisted.contributionOwnerUuid ?? null,
     settings,
     // Open running windows were removed while constructing exeCacheMap above;
     // runtime while the app was closed must never be credited.
     exeCache: exeCacheMap,
+    launchTargets,
+    manualLaunchTargets,
+    emulatorAutoBinaries,
+    emulatorManualBinaries,
+    emulatorAutoLaunchTargets,
+    emulatorManualLaunchTargets,
+    emulatorLaunchCandidates,
     gameMetadata: gameMetadataMap,
+    libraryImports,
+    libraryInstalls,
+    scopedExeLinks,
     recentSessions: hydratedSessions,
     activeSessions: normalizePersistedActiveSessions(persisted),
     ambiguousMatches: persisted.ambiguousMatches ?? [],
@@ -580,7 +1113,13 @@ function hydrate() {
     suppressContributionNotificationsOnce:
       persisted.suppressContributionNotificationsOnce === true,
   });
-  if (shouldPersistAchievementMigration) persist();
+  if (
+    shouldPersistAchievementMigration ||
+    shouldPersistLaunchPathOptOut ||
+    backfilledLibraryExecutableCache
+  ) {
+    persist();
+  }
 }
 
 async function loadEmulatorPrivacyContext() {
@@ -722,6 +1261,523 @@ export async function openUserIgnoredProcessesFolder() {
   await invoke("open_user_ignored_processes_folder");
 }
 
+function recordLaunchTargets(matches: ProcessMatch[]) {
+  if (useAppStore.getState().settings.rememberLaunchPaths === false) return;
+  for (const { process, game } of matches) {
+    if (
+      !process.exeName ||
+      !isWindowsExecutablePath(process.exePath) ||
+      isVolatileLaunchPath(process.exePath)
+    ) {
+      continue;
+    }
+    const owner: LaunchTargetOwner = {
+      gameId: game.id,
+      source: game.source ?? null,
+    };
+    const state = useAppStore.getState();
+    const existing = state.launchTargets.get(process.exeName.toLowerCase());
+    if (
+      existing?.path === process.exePath &&
+      existing.owner.gameId === owner.gameId &&
+      existing.owner.source === owner.source
+    ) {
+      continue;
+    }
+    state.setLaunchTarget({
+      exeName: process.exeName,
+      path: process.exePath,
+      owner,
+    });
+  }
+}
+
+export async function launchGame(
+  target: Pick<LaunchTarget, "exeName" | "path" | "owner">,
+): Promise<LaunchOutcome> {
+  if (useAppStore.getState().settings.gameLaunchingEnabled !== true) {
+    throw new Error("Enable 'Launch games directly' in Settings first.");
+  }
+  const key = target.path.toLowerCase();
+  const now = Date.now();
+  const guardedUntil = launchInFlight.get(key);
+  if (guardedUntil !== undefined && guardedUntil > now) return "busy";
+  launchInFlight.set(key, Number.POSITIVE_INFINITY);
+  logRuntime(`game launch requested ${target.exeName}`);
+  try {
+    await invoke("launch_executable", { path: target.path });
+    logRuntime(`game launch started ${target.exeName}`);
+    launchInFlight.set(key, Date.now() + LAUNCH_REENTRY_GUARD_MS);
+    return "launched";
+  } catch (error) {
+    launchInFlight.delete(key);
+    if (shouldForgetOnLaunchError(launchErrorKind(error))) {
+      const state = useAppStore.getState();
+      const exeKey = target.exeName.toLowerCase();
+      const manual = state.manualLaunchTargets.get(
+        manualLaunchTargetKey(target.owner),
+      );
+      if (
+        manual?.path === target.path &&
+        manual.exeName.toLowerCase() === exeKey
+      ) {
+        state.removeManualLaunchTarget(target.owner);
+        persist();
+      } else {
+        const current = state.launchTargets.get(exeKey);
+        if (current?.path === target.path) {
+          state.removeLaunchTarget(target.exeName);
+          persist();
+        }
+      }
+    }
+    logRuntime(`game launch failed ${target.exeName}: ${formatError(error)}`);
+    throw error;
+  }
+}
+
+export async function revealGameExecutable(
+  target: Pick<LaunchTarget, "exeName" | "path">,
+) {
+  logRuntime(`game file reveal requested ${target.exeName}`);
+  await invoke("reveal_executable", { path: target.path });
+}
+
+export async function verifyLaunchTargets(reason: string): Promise<number> {
+  if (useAppStore.getState().settings.rememberLaunchPaths === false) return 0;
+  try {
+    if (currentPlatform() !== "windows") return 0;
+  } catch {
+    return 0;
+  }
+  if (launchVerificationInFlight) return launchVerificationInFlight;
+  const state = useAppStore.getState();
+  const normalTargets = [
+    ...state.launchTargets.values(),
+    ...state.manualLaunchTargets.values(),
+  ];
+  const binaryTargets = [
+    ...state.emulatorAutoBinaries.values(),
+    ...state.emulatorManualBinaries.values(),
+  ];
+  const contentTargets = [
+    ...state.emulatorAutoLaunchTargets.values(),
+    ...state.emulatorManualLaunchTargets.values(),
+    ...state.emulatorLaunchCandidates.values(),
+  ];
+  if (
+    normalTargets.length === 0 &&
+    binaryTargets.length === 0 &&
+    contentTargets.length === 0
+  ) {
+    return 0;
+  }
+
+  launchVerificationInFlight = (async () => {
+    const executablePaths = [
+      ...normalTargets.map((target) => target.path),
+      ...binaryTargets.map((target) => target.exePath),
+    ];
+    const executableReports = executablePaths.length
+      ? await invoke<LaunchPathReport[]>("verify_launch_paths", {
+          paths: [...new Set(executablePaths)],
+        })
+      : [];
+    const contentReports = contentTargets.length
+      ? await invoke<LaunchPathReport[]>("verify_emulator_content_paths", {
+          targets: [
+            ...new Map(
+              contentTargets.map((target) => [
+                `${target.emulatorId}:${target.filePath.toLowerCase()}`,
+                { emulatorId: target.emulatorId, path: target.filePath },
+              ]),
+            ).values(),
+          ],
+        })
+      : [];
+    const staleExecutablePaths = new Set(
+      executableReports
+        .filter((report) => shouldForgetLaunchTarget(report.status))
+        .map((report) => report.path.toLowerCase()),
+    );
+    const staleContentPaths = new Set(
+      contentReports
+        .filter((report) => shouldForgetEmulatorPath(report.status))
+        .map((report) => report.path.toLowerCase()),
+    );
+    let pruned = 0;
+    for (const target of [...useAppStore.getState().launchTargets.values()]) {
+      if (!staleExecutablePaths.has(target.path.toLowerCase())) continue;
+      useAppStore.getState().removeLaunchTarget(target.exeName);
+      pruned += 1;
+    }
+    for (const target of [
+      ...useAppStore.getState().manualLaunchTargets.values(),
+    ]) {
+      if (!staleExecutablePaths.has(target.path.toLowerCase())) continue;
+      useAppStore.getState().removeManualLaunchTarget(target.owner);
+      pruned += 1;
+    }
+    for (const target of [
+      ...useAppStore.getState().emulatorAutoBinaries.values(),
+    ]) {
+      if (!staleExecutablePaths.has(target.exePath.toLowerCase())) continue;
+      useAppStore.getState().removeEmulatorAutoBinary(target.emulatorId);
+      pruned += 1;
+    }
+    for (const target of [
+      ...useAppStore.getState().emulatorManualBinaries.values(),
+    ]) {
+      if (!staleExecutablePaths.has(target.exePath.toLowerCase())) continue;
+      useAppStore.getState().removeEmulatorManualBinary(target.emulatorId);
+      pruned += 1;
+    }
+    for (const target of [
+      ...useAppStore.getState().emulatorAutoLaunchTargets.values(),
+    ]) {
+      if (!staleContentPaths.has(target.filePath.toLowerCase())) continue;
+      useAppStore.getState().removeEmulatorAutoLaunchTarget(target.contentKey);
+      pruned += 1;
+    }
+    for (const target of [
+      ...useAppStore.getState().emulatorManualLaunchTargets.values(),
+    ]) {
+      if (!staleContentPaths.has(target.filePath.toLowerCase())) continue;
+      useAppStore
+        .getState()
+        .removeEmulatorManualLaunchTarget(target.contentKey);
+      pruned += 1;
+    }
+    const currentCandidates = [
+      ...useAppStore.getState().emulatorLaunchCandidates.values(),
+    ];
+    const validCandidates = currentCandidates.filter(
+      (candidate) => !staleContentPaths.has(candidate.filePath.toLowerCase()),
+    );
+    if (validCandidates.length !== currentCandidates.length) {
+      useAppStore.getState().setEmulatorLaunchCandidates(validCandidates);
+      pruned += currentCandidates.length - validCandidates.length;
+    }
+    if (pruned > 0) persist();
+    lastLaunchVerificationAt = Date.now();
+    logRuntime(
+      `launch targets verified reason=${reason} checked=${normalTargets.length + binaryTargets.length + contentTargets.length} pruned=${pruned}`,
+    );
+    return pruned;
+  })();
+  try {
+    return await launchVerificationInFlight;
+  } catch (error) {
+    logRuntime(`launch target verification failed: ${formatError(error)}`);
+    return 0;
+  } finally {
+    launchVerificationInFlight = undefined;
+  }
+}
+
+export function verifyLaunchTargetsThrottled(reason = "my-games") {
+  if (
+    Date.now() - lastLaunchVerificationAt < LAUNCH_VERIFICATION_THROTTLE_MS ||
+    launchVerificationInFlight
+  ) {
+    return launchVerificationInFlight ?? Promise.resolve(0);
+  }
+  return verifyLaunchTargets(reason);
+}
+
+export function forgetLaunchTarget(exeName: string) {
+  useAppStore.getState().removeLaunchTarget(exeName);
+  logRuntime(`launch target forgotten ${exeName}`);
+  persist();
+}
+
+export function forgetManualLaunchTarget(owner: LaunchTargetOwner) {
+  useAppStore.getState().removeManualLaunchTarget(owner);
+  logRuntime(
+    `manual launch target forgotten gameId=${owner.gameId} source=${owner.source ?? "unknown"}`,
+  );
+  persist();
+}
+
+export async function chooseLaunchTarget(
+  exeNames: string[],
+  owner: LaunchTargetOwner,
+  aliases: readonly LaunchTargetOwner[] = [owner],
+): Promise<LaunchTarget | null> {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Program", extensions: ["exe"] }],
+  });
+  if (typeof selected !== "string") return null;
+  if (!isWindowsExecutablePath(selected)) {
+    throw new Error("Pick an .exe file with a full Windows path.");
+  }
+  const baseName = launchFileBaseName(selected);
+  const exeName =
+    exeNames.find(
+      (candidate) => candidate.toLowerCase() === baseName.toLowerCase(),
+    ) ?? baseName;
+  const target = { exeName, path: selected, owner };
+  useAppStore.getState().setManualLaunchTarget(target, aliases);
+  logRuntime(`launch target selected ${exeName}`);
+  persist();
+  if (isVolatileLaunchPath(selected)) {
+    useAppStore.getState().addToast({
+      tone: "info",
+      title: "Temporary launch file",
+      detail:
+        "This file is in a temporary folder and may disappear. Choose an installed copy if one is available.",
+    });
+  }
+  return target;
+}
+
+export async function chooseEmulatorBinary(
+  emulatorId: string,
+): Promise<EmulatorBinaryEntry | null> {
+  const adapter = adapterFor(emulatorId);
+  if (!adapter?.launch) throw new Error("This emulator is not launchable yet.");
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: adapter.label, extensions: ["exe", "com"] }],
+  });
+  if (typeof selected !== "string") return null;
+  if (!isValidEmulatorBinaryPath(emulatorId, selected)) {
+    throw new Error(
+      `Pick a supported ${adapter.label} program with a full Windows path.`,
+    );
+  }
+  const entry = {
+    emulatorId,
+    exePath: selected,
+    setAt: new Date().toISOString(),
+  };
+  useAppStore.getState().setEmulatorManualBinary(entry);
+  logRuntime(`manual emulator binary selected emulator=${emulatorId}`);
+  return entry;
+}
+
+export function forgetEmulatorManualBinary(emulatorId: string) {
+  useAppStore.getState().removeEmulatorManualBinary(emulatorId);
+  logRuntime(`manual emulator binary forgotten emulator=${emulatorId}`);
+}
+
+export async function chooseEmulatorLaunchFile(
+  mapping: EmulatorMapping,
+): Promise<EmulatorLaunchTarget | null> {
+  const adapter = adapterFor(mapping.emulatorId);
+  if (!adapter?.launch) throw new Error("This emulator is not launchable yet.");
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [
+      {
+        name: `${adapter.label} content`,
+        extensions: [...adapter.launch.fileExtensions],
+      },
+    ],
+  });
+  if (typeof selected !== "string") return null;
+  if (!isValidEmulatorContentPath(mapping.emulatorId, selected)) {
+    throw new Error(
+      `Pick a supported ${adapter.label} game file with a full Windows path.`,
+    );
+  }
+  const compatibility = emulatorTargetCompatibility(mapping, selected);
+  if (!compatibility.valid) {
+    throw new Error(
+      compatibility.reason === "content-name-mismatch"
+        ? `This file does not match the content PlayCounter recognized as ${mapping.display}.`
+        : `This file is not supported by ${adapter.label}.`,
+    );
+  }
+  const target = {
+    contentKey: mapping.contentKey,
+    emulatorId: mapping.emulatorId,
+    filePath: selected,
+    setAt: new Date().toISOString(),
+  };
+  useAppStore.getState().setEmulatorManualLaunchTarget(target);
+  useAppStore
+    .getState()
+    .setEmulatorLaunchCandidates(
+      [...useAppStore.getState().emulatorLaunchCandidates.values()].filter(
+        (candidate) => candidate.contentKey !== mapping.contentKey,
+      ),
+    );
+  logRuntime(
+    `manual emulator launch target selected emulator=${mapping.emulatorId} contentKey=${mapping.contentKey}`,
+  );
+  return target;
+}
+
+export function confirmEmulatorLaunchCandidate(contentKeyValue: string) {
+  const state = useAppStore.getState();
+  const candidate = state.emulatorLaunchCandidates.get(contentKeyValue);
+  const mapping = state.emulatorMappings.get(contentKeyValue);
+  if (!candidate || !mapping || mapping.decision !== "game") return null;
+  const compatibility = emulatorTargetCompatibility(
+    mapping,
+    candidate.filePath,
+  );
+  if (!compatibility.valid) return null;
+  const target: EmulatorLaunchTarget = {
+    contentKey: candidate.contentKey,
+    emulatorId: candidate.emulatorId,
+    filePath: candidate.filePath,
+    setAt: new Date().toISOString(),
+  };
+  state.setEmulatorManualLaunchTarget(target);
+  state.setEmulatorLaunchCandidates(
+    [...state.emulatorLaunchCandidates.values()].filter(
+      (item) => item.contentKey !== contentKeyValue,
+    ),
+  );
+  logRuntime(
+    `detected emulator launch target confirmed emulator=${mapping.emulatorId} contentKey=${mapping.contentKey}`,
+  );
+  return target;
+}
+
+export function forgetEmulatorLaunchTarget(contentKeyValue: string) {
+  const state = useAppStore.getState();
+  state.removeEmulatorManualLaunchTarget(contentKeyValue);
+  state.removeEmulatorAutoLaunchTarget(contentKeyValue);
+  state.setEmulatorLaunchCandidates(
+    [...state.emulatorLaunchCandidates.values()].filter(
+      (candidate) => candidate.contentKey !== contentKeyValue,
+    ),
+  );
+  logRuntime(`emulator launch target forgotten contentKey=${contentKeyValue}`);
+}
+
+function isEmulatorLaunchGuarded(emulatorId: string) {
+  const guardedUntil = emulatorLaunchInFlight.get(emulatorId);
+  return guardedUntil !== undefined && guardedUntil > Date.now();
+}
+
+export function resetEmulatorLaunchGuardForTests() {
+  emulatorLaunchInFlight.clear();
+}
+
+async function dispatchEmulatorLaunch(
+  emulatorId: string,
+  request: { emulatorId: string; exePath: string; contentPath: string },
+  logContext?: string,
+): Promise<EmulatorLaunchOutcome> {
+  if (isEmulatorLaunchGuarded(emulatorId)) return { kind: "busy" };
+  emulatorLaunchInFlight.set(emulatorId, Number.POSITIVE_INFINITY);
+  const suffix = logContext ? ` ${logContext}` : "";
+  logRuntime(`emulator launch requested emulator=${emulatorId}${suffix}`);
+  try {
+    const outcome = await invoke<EmulatorLaunchOutcome>(
+      "launch_emulator_content",
+      { request },
+    );
+    if (outcome.kind === "spawned") {
+      emulatorLaunchInFlight.set(
+        emulatorId,
+        Date.now() + LAUNCH_REENTRY_GUARD_MS,
+      );
+      logRuntime(`emulator launch started emulator=${emulatorId}${suffix}`);
+    } else {
+      emulatorLaunchInFlight.delete(emulatorId);
+      logRuntime(
+        `emulator launch outcome=${outcome.kind} emulator=${emulatorId}${suffix}`,
+      );
+    }
+    return outcome;
+  } catch (error) {
+    emulatorLaunchInFlight.delete(emulatorId);
+    if (shouldForgetEmulatorOnLaunchError(error)) {
+      void verifyLaunchTargets("emulator-launch-error");
+    }
+    logRuntime(
+      `emulator launch failed emulator=${emulatorId}${suffix}: ${formatError(error)}`,
+    );
+    throw error;
+  }
+}
+
+export async function launchEmulatorGame(
+  mapping: EmulatorMapping,
+): Promise<EmulatorLaunchOutcome> {
+  const state = useAppStore.getState();
+  if (state.settings.gameLaunchingEnabled !== true) {
+    throw new Error("Enable 'Launch games directly' in Settings first.");
+  }
+  const binary = resolveEmulatorBinary(
+    mapping.emulatorId,
+    state.emulatorAutoBinaries,
+    state.emulatorManualBinaries,
+  );
+  const target = resolveEmulatorLaunchTarget(
+    mapping.contentKey,
+    state.emulatorAutoLaunchTargets,
+    state.emulatorManualLaunchTargets,
+  );
+  if (!binary)
+    throw new Error(`Set the ${mapping.label} program in Settings first.`);
+  if (!target) throw new Error("Set this emulator game's launch file first.");
+
+  return dispatchEmulatorLaunch(
+    mapping.emulatorId,
+    {
+      emulatorId: mapping.emulatorId,
+      exePath: binary.exePath,
+      contentPath: target.filePath,
+    },
+    `contentKey=${mapping.contentKey}`,
+  );
+}
+
+export async function startEmulatorGame(
+  emulatorId: string,
+): Promise<EmulatorLaunchOutcome | null> {
+  const state = useAppStore.getState();
+  if (state.settings.gameLaunchingEnabled !== true) {
+    throw new Error("Enable 'Launch games directly' in Settings first.");
+  }
+  const adapter = adapterFor(emulatorId);
+  if (!adapter?.launch) throw new Error("This emulator is not launchable yet.");
+  const binary = resolveEmulatorBinary(
+    emulatorId,
+    state.emulatorAutoBinaries,
+    state.emulatorManualBinaries,
+  );
+  if (!binary) {
+    throw new Error(
+      `Start ${adapter.label} once so PlayCounter can find its program automatically, or set its program in Settings.`,
+    );
+  }
+  if (isEmulatorLaunchGuarded(emulatorId)) return { kind: "busy" };
+
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [
+      {
+        name: `${adapter.label} content`,
+        extensions: [...adapter.launch.fileExtensions],
+      },
+    ],
+  });
+  if (typeof selected !== "string") return null;
+  if (!isValidEmulatorContentPath(emulatorId, selected)) {
+    throw new Error(
+      `Pick a supported ${adapter.label} game file with a full Windows path.`,
+    );
+  }
+
+  return dispatchEmulatorLaunch(emulatorId, {
+    emulatorId,
+    exePath: binary.exePath,
+    contentPath: selected,
+  });
+}
+
 async function handleProcessSnapshot(processes: ProcessSnapshot[]) {
   const startedAt = Date.now();
   const normalized = uniqueProcesses(processes);
@@ -757,6 +1813,7 @@ async function handleProcessSnapshot(processes: ProcessSnapshot[]) {
   );
   verboseRuntime(`scan ignored: ${formatExeSample(ignored)}`);
   const matches = [...(await resolveProcesses(candidates)), ...emulatorMatches];
+  recordLaunchTargets(matches);
   logRuntime(`scan resolved matches=${matches.length}`);
 
   const currentSessions = collapseDuplicateActiveSessions();
@@ -766,7 +1823,11 @@ async function handleProcessSnapshot(processes: ProcessSnapshot[]) {
   // the first one seen starts it, and it only ends once none of them is left.
   const matchesByGame = new Map<
     string,
-    { primary: ProcessMatch; targetPids: number[] }
+    {
+      primary: ProcessMatch;
+      processes: ProcessSnapshot[];
+      targetPids: number[];
+    }
   >();
   for (const match of matches) {
     const key = activeSessionKey(
@@ -779,10 +1840,14 @@ async function handleProcessSnapshot(processes: ProcessSnapshot[]) {
     if (!grouped) {
       matchesByGame.set(key, {
         primary: match,
+        processes: [match.process],
         targetPids: pid === undefined ? [] : [pid],
       });
-    } else if (pid !== undefined && !grouped.targetPids.includes(pid)) {
-      grouped.targetPids.push(pid);
+    } else {
+      grouped.processes.push(match.process);
+      if (pid !== undefined && !grouped.targetPids.includes(pid)) {
+        grouped.targetPids.push(pid);
+      }
     }
   }
   const nextKeys = new Set(matchesByGame.keys());
@@ -792,9 +1857,16 @@ async function handleProcessSnapshot(processes: ProcessSnapshot[]) {
 
   for (const current of currentSessions) {
     const continuingGroup = matchesByGame.get(sessionIdentityKey(current));
-    if (continuingGroup) {
-      reconcileSessionProvenance(current, continuingGroup.primary);
-      checkpointActiveSessionIfDue(current);
+    if (
+      continuingGroup &&
+      (!current.recoveredFromCheckpoint ||
+        canResumeRecoveredSession(current, continuingGroup.processes))
+    ) {
+      const reconciled = reconcileSessionProvenance(
+        current,
+        continuingGroup.primary,
+      );
+      checkpointActiveSessionIfDue(reconciled);
       verboseRuntime(
         `scan active session unchanged ${current.gameName} (${current.exeName})`,
       );
@@ -802,7 +1874,7 @@ async function handleProcessSnapshot(processes: ProcessSnapshot[]) {
     }
 
     logRuntime(
-      `scan match ended; ending active session ${current.gameName} (${current.exeName})`,
+      `scan ${continuingGroup ? "process continuity unconfirmed" : "match ended"}; ending active session ${current.gameName} (${current.exeName})`,
     );
     await endSession(
       current,
@@ -929,29 +2001,131 @@ function disableEmulatorDetectionForScan(): ProcessMatch[] {
     emulatorRuntime.size > 0
   ) {
     useAppStore.setState({ emulatorObservations: [] });
+    useAppStore.getState().setEmulatorLaunchCandidates([]);
     emulatorRuntime.clear();
     lastEmulatorRunningKeys.clear();
   }
   return [];
 }
 
-function readEmulatorSignals(hosts: ProcessSnapshot[]) {
+function rawEmulatorSignals(
+  process: ProcessSnapshot,
+): RawEmulatorSignals | null {
+  if (!process.emulatorId || process.pid === undefined) return null;
+  return {
+    emulatorId: process.emulatorId,
+    exeName: process.exeName,
+    exePath: process.exePath,
+    pid: process.pid,
+    startedAtUnix: process.startedAtUnix ?? 0,
+    args: process.commandLine ?? [],
+    workingDirectory: process.workingDirectory ?? null,
+    windowTitle: process.windowTitle ?? null,
+    openFiles: process.openFiles ?? [],
+  };
+}
+
+type KnownTargetAssociations = {
+  byPath: Map<string, EmulatorMapping | null>;
+  byAlias: Map<string, EmulatorMapping | null>;
+};
+
+function uniqueMappingSet(
+  values: Map<string, EmulatorMapping | null>,
+  key: string,
+  mapping: EmulatorMapping,
+) {
+  if (!values.has(key)) {
+    values.set(key, mapping);
+    return;
+  }
+  const existing = values.get(key);
+  if (existing?.contentKey !== mapping.contentKey) values.set(key, null);
+}
+
+function knownTargetAssociations(
+  privateTokens: readonly string[],
+): KnownTargetAssociations {
+  const state = useAppStore.getState();
+  const context = {
+    denylist: GENERIC_IDENTITY_DENYLIST,
+    privateTokens,
+  };
+  const byPath = new Map<string, EmulatorMapping | null>();
+  const byAlias = new Map<string, EmulatorMapping | null>();
+  for (const mapping of state.emulatorMappings.values()) {
+    if (mapping.decision !== "game") continue;
+    const adapter = adapterFor(mapping.emulatorId);
+    const target = resolveEmulatorLaunchTarget(
+      mapping.contentKey,
+      state.emulatorAutoLaunchTargets,
+      state.emulatorManualLaunchTargets,
+    );
+    if (!adapter?.launch || !target) continue;
+    const pathKey = `${mapping.emulatorId}:${target.filePath.toLowerCase()}`;
+    uniqueMappingSet(byPath, pathKey, mapping);
+    const identity = adapter.launch.identifyTarget(
+      { kind: "file", filePath: target.filePath },
+      context,
+    );
+    if (!identity) continue;
+    const alias = contentKey({
+      emulatorId: mapping.emulatorId,
+      contentKind: identity.kind,
+      contentValue: identity.value,
+    });
+    if (alias !== mapping.contentKey) uniqueMappingSet(byAlias, alias, mapping);
+  }
+  return { byPath, byAlias };
+}
+
+function mappedTargetSignal(
+  mapping: EmulatorMapping,
+  fallback: EmulatorContentSignal | undefined,
+): EmulatorContentSignal {
+  return {
+    kind: mapping.contentKind,
+    value: mapping.contentValue,
+    display: mapping.display,
+    trust: mapping.trust,
+    shareable:
+      mapping.shareable ??
+      (mapping.trust === "recognized" && mapping.contentKind !== "folder"),
+    volatile: fallback?.volatile ?? false,
+    detectionSource: mapping.detectionSource ?? fallback?.detectionSource,
+    searchHint: fallback?.searchHint,
+    shareableSearchHint: fallback?.shareableSearchHint,
+  };
+}
+
+function readEmulatorSignals(
+  hosts: ProcessSnapshot[],
+  associations: KnownTargetAssociations,
+) {
   const privateTokens = [emulatorPrivacy.userName, emulatorPrivacy.homeDirName];
   return hosts.flatMap((process) => {
     const adapter = adapterFor(process.emulatorId);
-    if (!adapter || !process.emulatorId || process.pid === undefined) return [];
-    const signals: RawEmulatorSignals = {
-      emulatorId: process.emulatorId,
-      exeName: process.exeName,
-      pid: process.pid,
-      startedAtUnix: process.startedAtUnix ?? 0,
-      args: process.commandLine ?? [],
-      windowTitle: process.windowTitle ?? null,
-    };
-    const reading = adapter.read(signals, {
+    const signals = rawEmulatorSignals(process);
+    if (!adapter || !signals) return [];
+    const rawReading = adapter.read(signals, {
       denylist: GENERIC_IDENTITY_DENYLIST,
       privateTokens,
     });
+    const discovery = adapter.launch?.discoverTarget(signals);
+    const mapping = discovery
+      ? associations.byPath.get(
+          `${signals.emulatorId}:${discovery.target.filePath.toLowerCase()}`,
+        )
+      : undefined;
+    const reading = mapping
+      ? {
+          state: "content" as const,
+          content: mappedTargetSignal(
+            mapping,
+            rawReading.state === "content" ? rawReading.content : undefined,
+          ),
+        }
+      : rawReading;
     return [
       {
         pid: signals.pid,
@@ -963,6 +2137,115 @@ function readEmulatorSignals(hosts: ProcessSnapshot[]) {
       },
     ];
   });
+}
+
+async function learnEmulatorContentTargets(
+  hosts: ProcessSnapshot[],
+  nowIso: string,
+) {
+  if (useAppStore.getState().settings.rememberLaunchPaths === false) return;
+  const discoveries: Array<{
+    candidate: EmulatorLaunchCandidate;
+    association: "proven" | "requires_confirmation";
+  }> = [];
+
+  for (const host of hosts) {
+    const adapter = adapterFor(host.emulatorId);
+    const signals = rawEmulatorSignals(host);
+    if (!adapter?.launch || !signals) continue;
+    const discovery = adapter.launch.discoverTarget(signals);
+    if (
+      !discovery ||
+      !isValidEmulatorContentPath(signals.emulatorId, discovery.target.filePath)
+    ) {
+      continue;
+    }
+    const reading = adapter.read(signals, {
+      denylist: GENERIC_IDENTITY_DENYLIST,
+      privateTokens: [emulatorPrivacy.userName, emulatorPrivacy.homeDirName],
+    });
+    if (reading.state !== "content") continue;
+    const key = contentKey({
+      emulatorId: signals.emulatorId,
+      contentKind: reading.content.kind,
+      contentValue: reading.content.value,
+    });
+    const state = useAppStore.getState();
+    const mapping = state.emulatorMappings.get(key);
+    if (!mapping || mapping.decision !== "game") continue;
+    if (
+      resolveEmulatorLaunchTarget(
+        key,
+        state.emulatorAutoLaunchTargets,
+        state.emulatorManualLaunchTargets,
+      )
+    ) {
+      continue;
+    }
+    const compatibility = emulatorTargetCompatibility(
+      mapping,
+      discovery.target.filePath,
+    );
+    if (!compatibility.valid) continue;
+    discoveries.push({
+      association: compatibility.association,
+      candidate: {
+        contentKey: key,
+        emulatorId: signals.emulatorId,
+        filePath: discovery.target.filePath,
+        displayName: launchFileBaseName(discovery.target.filePath),
+        setAt: nowIso,
+      },
+    });
+  }
+
+  if (discoveries.length === 0) {
+    return;
+  }
+  const reports = await invoke<LaunchPathReport[]>(
+    "verify_emulator_content_paths",
+    {
+      targets: [
+        ...new Map(
+          discoveries.map(({ candidate }) => [
+            `${candidate.emulatorId}:${candidate.filePath.toLowerCase()}`,
+            { emulatorId: candidate.emulatorId, path: candidate.filePath },
+          ]),
+        ).values(),
+      ],
+    },
+  ).catch(() => []);
+  const validPaths = new Set(
+    reports
+      .filter((report) => report.status === "ok")
+      .map((report) => report.path.toLowerCase()),
+  );
+  const candidates = new Map(useAppStore.getState().emulatorLaunchCandidates);
+  for (const discovery of discoveries) {
+    if (!validPaths.has(discovery.candidate.filePath.toLowerCase())) continue;
+    if (discovery.association === "proven") {
+      useAppStore.getState().setEmulatorAutoLaunchTarget({
+        contentKey: discovery.candidate.contentKey,
+        emulatorId: discovery.candidate.emulatorId,
+        filePath: discovery.candidate.filePath,
+        setAt: discovery.candidate.setAt,
+      });
+      logRuntime(
+        `emulator launch target learned emulator=${discovery.candidate.emulatorId} contentKey=${discovery.candidate.contentKey}`,
+      );
+      candidates.delete(discovery.candidate.contentKey);
+    } else {
+      const existing = candidates.get(discovery.candidate.contentKey);
+      candidates.set(
+        discovery.candidate.contentKey,
+        existing?.filePath.toLowerCase() ===
+          discovery.candidate.filePath.toLowerCase()
+          ? existing
+          : discovery.candidate,
+      );
+    }
+  }
+  useAppStore.getState().setEmulatorLaunchCandidates([...candidates.values()]);
 }
 
 async function applyEmulatorReadings(
@@ -981,14 +2264,37 @@ async function applyEmulatorReadings(
       lastSeenAt: nowIso,
       hostExeNames: [host.exeName],
     });
+    if (
+      adapter.launch &&
+      state.settings.rememberLaunchPaths !== false &&
+      !state.emulatorAutoBinaries.has(host.emulatorId) &&
+      isValidEmulatorBinaryPath(host.emulatorId, host.exePath) &&
+      !isVolatileLaunchPath(host.exePath)
+    ) {
+      state.setEmulatorAutoBinary({
+        emulatorId: host.emulatorId,
+        exePath: host.exePath,
+        setAt: nowIso,
+      });
+      logRuntime(`emulator binary learned emulator=${host.emulatorId}`);
+    }
   }
   const lookupEnabled =
     state.settings.emulatorContentLookup !== false &&
     !isOfflineStatus(state.backendHealth.status) &&
     now >= emulatorLookupUnavailableUntil;
+  const privateTokens = [emulatorPrivacy.userName, emulatorPrivacy.homeDirName];
+  const associations = knownTargetAssociations(privateTokens);
+  for (const runtime of emulatorRuntime.values()) {
+    if (!runtime.lastContentKey) continue;
+    const mapped = associations.byAlias.get(runtime.lastContentKey);
+    if (mapped) runtime.lastContentKey = mapped.contentKey;
+  }
   const reconciled = reconcileEmulatorReadings({
-    readings: readEmulatorSignals(hosts),
-    observations: state.emulatorObservations,
+    readings: readEmulatorSignals(hosts, associations),
+    observations: state.emulatorObservations.filter(
+      (observation) => !associations.byAlias.get(observation.key),
+    ),
     mappings: state.emulatorMappings,
     runtime: emulatorRuntime,
     now,
@@ -1022,10 +2328,13 @@ async function applyEmulatorReadings(
   const resolveIntent = reconciled.intents.find(
     (intent) => intent.type === "resolve",
   );
-  if (resolveIntent?.type !== "resolve" || !lookupEnabled) return matches;
+  if (resolveIntent?.type !== "resolve" || !lookupEnabled) {
+    await learnEmulatorContentTargets(hosts, nowIso);
+    return matches;
+  }
 
   try {
-    const response = await fetchWithTimeout(
+    const response = await requestJsonResponse<EmulatorResolveResponse>(
       `${state.settings.apiEndpoint}/api/emulator/resolve`,
       {
         method: "POST",
@@ -1040,7 +2349,7 @@ async function applyEmulatorReadings(
       }
       throw new Error(`${response.status} ${response.statusText}`);
     }
-    const body = (await response.json()) as EmulatorResolveResponse;
+    const body = response.data;
     const results = new Map(body.results.map((result) => [result.key, result]));
     for (const item of resolveIntent.items) {
       const result = results.get(item.key);
@@ -1095,6 +2404,7 @@ async function applyEmulatorReadings(
     });
     verboseRuntime(`emulator resolve unavailable: ${formatError(error)}`);
   }
+  await learnEmulatorContentTargets(hosts, nowIso);
   return matches;
 }
 
@@ -1220,21 +2530,26 @@ function observationLaunchContext(
 function reconcileSessionProvenance(
   session: ActiveSession,
   match: ProcessMatch,
-) {
+): ActiveSession {
   if (match.emulator) {
     if (session.emulator?.contentKey !== match.emulator.contentKey) {
-      updateActiveSession({ ...session, emulator: match.emulator });
+      const updated = { ...session, emulator: match.emulator };
+      updateActiveSession(updated);
+      return updated;
     }
-    return;
+    return session;
   }
   if (session.emulator) {
     const { emulator: _emulator, ...native } = session;
-    updateActiveSession({ ...native, exeName: match.process.exeName });
+    const updated = { ...native, exeName: match.process.exeName };
+    updateActiveSession(updated);
+    return updated;
   }
+  return session;
 }
 
 type CachedResolution =
-  | { state: "matched"; game: Game }
+  | { state: "matched"; game: Game; via: "cache" | "scoped" }
   | { state: "skipped" }
   | { state: "query" };
 
@@ -1253,6 +2568,8 @@ async function resolveProcesses(
   );
   let cacheMatchedCount = 0;
   let cacheSkippedCount = 0;
+  const scopedResolvedKeys = new Set<string>();
+  const unscopedSeenKeys = new Set<string>();
 
   for (const process of processes) {
     const existing = state.exeCache.get(process.exeName.toLowerCase());
@@ -1271,16 +2588,32 @@ async function resolveProcesses(
       queryProcesses.push(process);
       continue;
     }
-    // An unresolved ambiguity has no exe cache entry and would otherwise be
-    // re-queried on every scan; the stored candidates keep driving the UI. A
-    // matched cache entry always wins - the ambiguity is stale then (e.g. the
-    // exe was added as a custom game while the picker was open) and gets
-    // dropped so the picker disappears and the match tracks normally.
+    const cached = resolveCachedProcess(
+      process,
+      state.exeCache,
+      state.scopedExeLinks,
+      now,
+      ttlMs,
+    );
+    if (cached.state === "matched") {
+      // A global basename decision makes the old picker stale. A scoped
+      // decision deliberately leaves it available for another running copy of
+      // the same basename outside the linked install directory.
+      if (cached.via === "cache") {
+        state.removeAmbiguousMatch(process.exeName);
+      } else {
+        scopedResolvedKeys.add(processCacheKey(process));
+      }
+      matches.push({ process, game: cached.game });
+      cacheMatchedCount += 1;
+      continue;
+    }
+    unscopedSeenKeys.add(processCacheKey(process));
+    // An unresolved ambiguity has no global exe cache entry and would
+    // otherwise be re-queried on every scan. Exact scoped evidence was already
+    // given first refusal above.
     const ambiguous = ambiguousByKey.get(processCacheKey(process));
-    if (ambiguous && existing?.state === "matched") {
-      state.removeAmbiguousMatch(process.exeName);
-      logRuntime(`stale ambiguity dropped for matched exe ${process.exeName}`);
-    } else if (
+    if (
       ambiguous &&
       now - Date.parse(ambiguous.lastCheckedAt ?? ambiguous.detectedAt) <
         PENDING_COMMUNITY_RETRY_MS
@@ -1288,15 +2621,15 @@ async function resolveProcesses(
       cacheSkippedCount += 1;
       continue;
     }
-    const cached = resolveCachedProcess(process, state.exeCache, now, ttlMs);
-    if (cached.state === "matched") {
-      matches.push({ process, game: cached.game });
-      cacheMatchedCount += 1;
-    } else if (cached.state === "query") {
+    if (cached.state === "query") {
       queryProcesses.push(process);
     } else {
       cacheSkippedCount += 1;
     }
+  }
+
+  for (const key of scopedResolvedKeys) {
+    if (!unscopedSeenKeys.has(key)) state.removeAmbiguousMatch(key);
   }
 
   if (communityCheckProcesses.length > 0) {
@@ -1313,82 +2646,83 @@ async function resolveProcesses(
     return matches;
   }
 
-  try {
-    const requestStartedAt = Date.now();
-    logRuntime(
-      `match API batch request started count=${queryProcesses.length}`,
-    );
-    const response = await fetchWithTimeout(
-      `${state.settings.apiEndpoint}/api/match-processes`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        timeoutMs: API_REQUEST_TIMEOUT_MS,
-        body: JSON.stringify({
-          processes: queryProcesses.map((process) => ({
-            key: processCacheKey(process),
-            identifiers: processIdentifiers(process),
-          })),
-        }),
-      },
-    );
-    if (!response.ok)
-      throw new Error(`${response.status} ${response.statusText}`);
-
-    const body = (await response.json()) as MatchProcessesResponse;
-    const matchedCount = body.matches.filter((match) => match.game).length;
-    logRuntime(
-      `match API batch response ok count=${body.matches.length}, matched=${matchedCount}, durationMs=${Date.now() - requestStartedAt}`,
-    );
-    const resultsByExe = new Map(
-      body.matches.map((match) => [match.key.toLowerCase(), match]),
-    );
-
-    for (const process of queryProcesses) {
-      const result = resultsByExe.get(processCacheKey(process));
-      if (result?.ambiguousGames?.length) {
-        cacheAmbiguousMatch(
-          process,
-          result.ambiguousGames,
-          result.flaggedIdentifier?.reason,
-        );
-        continue;
-      }
-      const game = result?.game ?? null;
-      if (game) {
-        cacheMatchResult(process.exeName, game);
-        matches.push({ process, game });
-        continue;
-      }
-      const pendingCommunityGame =
-        result?.pendingCommunityGame ?? result?.pendingCommunityGames?.[0];
-      if (pendingCommunityGame) {
-        cachePendingCommunityMatch(process.exeName, pendingCommunityGame);
-        continue;
-      }
-
-      cacheMatchResult(process.exeName, game);
-    }
-  } catch (error) {
-    logRuntime(
-      `match API batch failed count=${queryProcesses.length}: ${formatError(error)}`,
-    );
-    state.addApiRequestLogEntry({
-      endpoint: state.settings.apiEndpoint,
-      exeName: `${queryProcesses.length} executables`,
-      status: "error",
-      detail: formatError(error),
-    });
-    if (
-      state.backendHealth.status === "offline" ||
-      state.backendHealth.status === "reconnecting"
-    ) {
-      verboseRuntime(
-        "match API unavailable; leaving uncached executables pending",
+  const resultsByExe = new Map<
+    string,
+    MatchProcessesResponse["matches"][number]
+  >();
+  for (const batch of processLookupBatches(queryProcesses)) {
+    try {
+      const requestStartedAt = Date.now();
+      logRuntime(`match API batch request started count=${batch.length}`);
+      const response = await requestJsonResponse<MatchProcessesResponse>(
+        `${state.settings.apiEndpoint}/api/match-processes`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          timeoutMs: API_REQUEST_TIMEOUT_MS,
+          body: JSON.stringify({ processes: batch }),
+        },
       );
-    } else {
-      state.setRuntimeError(`Match API failed: ${formatError(error)}`);
+      if (!response.ok)
+        throw new Error(`${response.status} ${response.statusText}`);
+
+      const body = response.data;
+      const matchedCount = body.matches.filter((match) => match.game).length;
+      logRuntime(
+        `match API batch response ok count=${body.matches.length}, matched=${matchedCount}, durationMs=${Date.now() - requestStartedAt}`,
+      );
+      for (const result of body.matches) {
+        resultsByExe.set(result.key.toLowerCase(), result);
+      }
+    } catch (error) {
+      logRuntime(
+        `match API batch failed count=${batch.length}: ${formatError(error)}`,
+      );
+      state.addApiRequestLogEntry({
+        endpoint: state.settings.apiEndpoint,
+        exeName: `${batch.length} executables`,
+        status: "error",
+        detail: formatError(error),
+      });
+      if (
+        state.backendHealth.status === "offline" ||
+        state.backendHealth.status === "reconnecting"
+      ) {
+        verboseRuntime(
+          "match API unavailable; leaving uncached executables pending",
+        );
+      } else {
+        state.setRuntimeError(`Match API failed: ${formatError(error)}`);
+      }
     }
+  }
+
+  for (const process of queryProcesses) {
+    const result = resultsByExe.get(processCacheKey(process));
+    // Failed batches stay uncached so a later scan can retry them.
+    if (!result) continue;
+    if (result.ambiguousGames?.length) {
+      cacheAmbiguousMatch(
+        process,
+        result.ambiguousGames,
+        result.flaggedIdentifier?.reason,
+      );
+      continue;
+    }
+    const game = result.game;
+    if (game) {
+      cacheMatchResult(process.exeName, game);
+      matches.push({ process, game });
+      continue;
+    }
+    const pendingCommunityGame =
+      result.pendingCommunityGame ?? result.pendingCommunityGames?.[0];
+    if (pendingCommunityGame) {
+      cachePendingCommunityMatch(process.exeName, pendingCommunityGame);
+      continue;
+    }
+
+    cacheMatchResult(process.exeName, game);
   }
 
   return matches;
@@ -1402,59 +2736,59 @@ async function checkCommunityUpgrades(processes: ProcessSnapshot[]) {
   for (const process of processes) {
     communityUpgradeCheckedAt.set(processCacheKey(process), now);
   }
-  try {
-    const response = await fetchWithTimeout(
-      `${state.settings.apiEndpoint}/api/match-processes`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        timeoutMs: API_REQUEST_TIMEOUT_MS,
-        body: JSON.stringify({
-          processes: processes.map((process) => ({
-            key: processCacheKey(process),
-            identifiers: processIdentifiers(process),
-          })),
-        }),
-      },
-    );
-    if (!response.ok)
-      throw new Error(`${response.status} ${response.statusText}`);
-
-    const body = (await response.json()) as MatchProcessesResponse;
-    for (const result of body.matches) {
-      const aliases = result.communityGameAliases;
-      // The surviving game can be the match or one of the picker candidates -
-      // an exe that IGDB and the community both map is ambiguous by design.
-      const communityGames = [
-        result.game,
-        ...(result.ambiguousGames ?? []),
-      ].filter((game): game is Game => game?.source === "community");
-
-      if (applyMergedCommunityGame(result.key, communityGames, aliases)) {
-        continue;
-      }
-
-      const pendingCommunityGames =
-        result.pendingCommunityGames ??
-        (result.pendingCommunityGame ? [result.pendingCommunityGame] : []);
-      const suggestionOutcome = applyCommunitySuggestionOutcome(
-        result.key,
-        communityGames,
-        pendingCommunityGames,
-        result.pendingCommunityGames !== undefined,
-        Boolean(result.game || result.ambiguousGames?.length),
-        aliases,
+  for (const batch of processLookupBatches(processes)) {
+    try {
+      const response = await requestJsonResponse<MatchProcessesResponse>(
+        `${state.settings.apiEndpoint}/api/match-processes`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          timeoutMs: API_REQUEST_TIMEOUT_MS,
+          body: JSON.stringify({ processes: batch }),
+        },
       );
-      if (suggestionOutcome === "pending" || suggestionOutcome === "approved") {
-        continue;
+      if (!response.ok)
+        throw new Error(`${response.status} ${response.statusText}`);
+
+      const body = response.data;
+      for (const result of body.matches) {
+        const aliases = result.communityGameAliases;
+        // The surviving game can be the match or one of the picker candidates -
+        // an exe that IGDB and the community both map is ambiguous by design.
+        const communityGames = [
+          result.game,
+          ...(result.ambiguousGames ?? []),
+        ].filter((game): game is Game => game?.source === "community");
+
+        if (applyMergedCommunityGame(result.key, communityGames, aliases)) {
+          continue;
+        }
+
+        const pendingCommunityGames =
+          result.pendingCommunityGames ??
+          (result.pendingCommunityGame ? [result.pendingCommunityGame] : []);
+        const suggestionOutcome = applyCommunitySuggestionOutcome(
+          result.key,
+          communityGames,
+          pendingCommunityGames,
+          result.pendingCommunityGames !== undefined,
+          Boolean(result.game || result.ambiguousGames?.length),
+          aliases,
+        );
+        if (
+          suggestionOutcome === "pending" ||
+          suggestionOutcome === "approved"
+        ) {
+          continue;
+        }
+        if (result.game && result.game.source !== "custom") {
+          setCommunityUpgrade(result.key, result.game, aliases);
+          continue;
+        }
       }
-      if (result.game && result.game.source !== "custom") {
-        setCommunityUpgrade(result.key, result.game, aliases);
-        continue;
-      }
+    } catch (error) {
+      verboseRuntime(`community upgrade check failed: ${formatError(error)}`);
     }
-  } catch (error) {
-    verboseRuntime(`community upgrade check failed: ${formatError(error)}`);
   }
 }
 
@@ -1518,7 +2852,7 @@ function survivorOfRetiredGame(
 // Whether a community game is the one this entry suggested itself - directly,
 // or because the suggestion's id was retired when that game absorbed it.
 function isOwnCommunitySuggestion(
-  entry: ExeCacheEntry,
+  entry: Pick<LocalLink, "communitySuggestionId">,
   game: Game,
   aliases: CommunityGameAlias[] | undefined,
 ) {
@@ -1540,15 +2874,15 @@ function isOwnCommunitySuggestion(
 // their own session; this folds them onto one and moves what was recorded
 // under the others.
 function canonicalizeSharedCustomGames(communitySuggestionId: number) {
-  const gameIds = [...useAppStore.getState().exeCache.values()]
+  const current = useAppStore.getState();
+  const gameIds = listLocalLinks(current.exeCache, current.scopedExeLinks)
     .filter(
       (entry) =>
-        entry.state === "matched" &&
         entry.source === "custom" &&
         entry.communitySuggestionId === communitySuggestionId &&
         entry.gameId !== undefined,
     )
-    .map((entry) => entry.gameId as number);
+    .map((entry) => entry.gameId);
   if (gameIds.length < 2) return;
 
   const canonicalId = Math.min(...gameIds);
@@ -1560,6 +2894,7 @@ function canonicalizeSharedCustomGames(communitySuggestionId: number) {
 
   useAppStore.setState((state) => {
     const exeCache = new Map(state.exeCache);
+    const scopedExeLinks = new Map(state.scopedExeLinks);
     for (const [key, entry] of exeCache) {
       if (
         entry.state === "matched" &&
@@ -1571,9 +2906,19 @@ function canonicalizeSharedCustomGames(communitySuggestionId: number) {
         exeCache.set(key, { ...entry, gameId: canonicalId });
       }
     }
+    for (const [key, entry] of scopedExeLinks) {
+      if (
+        entry.source === "custom" &&
+        entry.communitySuggestionId === communitySuggestionId &&
+        staleIds.has(entry.gameId)
+      ) {
+        scopedExeLinks.set(key, { ...entry, gameId: canonicalId });
+      }
+    }
 
     return {
       exeCache,
+      scopedExeLinks,
       activeSessions: dedupeSessionsByGame(
         state.activeSessions.map((session) =>
           isStaleCustom(session)
@@ -1606,17 +2951,18 @@ function canonicalizeSharedCustomGames(communitySuggestionId: number) {
 // while the game remains custom when its verified row appears, and is removed
 // when neither row exists because moderators rejected it.
 export function applyCommunitySuggestionOutcome(
-  exeName: string,
+  target: string | LocalLinkRef,
   communityGames: Game[],
   pendingCommunityGames: Game[],
   pendingGamesAreAuthoritative: boolean,
   responseHasOtherMatches: boolean,
   aliases?: CommunityGameAlias[],
 ) {
-  const existing = useAppStore.getState().exeCache.get(exeName.toLowerCase());
+  const state = useAppStore.getState();
+  const ref = localLinkRef(target);
+  const existing = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
   if (
-    existing?.state !== "matched" ||
-    existing.source !== "custom" ||
+    existing?.source !== "custom" ||
     !existing.communitySuggestionId ||
     existing.communitySuggestionStatus === "verified" ||
     (existing.communitySuggestionStatus === undefined &&
@@ -1629,7 +2975,7 @@ export function applyCommunitySuggestionOutcome(
     isOwnCommunitySuggestion(existing, game, aliases),
   );
   if (approved) {
-    setCommunitySuggestionApproved(exeName, approved);
+    setCommunitySuggestionApproved(ref, approved);
     return "approved" as const;
   }
 
@@ -1637,7 +2983,7 @@ export function applyCommunitySuggestionOutcome(
     isOwnCommunitySuggestion(existing, game, aliases),
   );
   if (pending) {
-    setCommunitySuggestionMarker(exeName, pending, false);
+    setCommunitySuggestionMarker(ref, pending, false);
     return "pending" as const;
   }
 
@@ -1648,31 +2994,49 @@ export function applyCommunitySuggestionOutcome(
     return "inconclusive" as const;
   }
   if (existing.communitySuggestionStatus !== "rejected") {
-    setCommunitySuggestionRejected(exeName, existing.communitySuggestionNote);
+    setCommunitySuggestionRejected(ref, existing.communitySuggestionNote);
   }
   return "rejected" as const;
 }
 
-function setCommunitySuggestionRejected(exeName: string, note?: string) {
-  const key = exeName.toLowerCase();
+function localLinkRef(target: string | LocalLinkRef): LocalLinkRef {
+  return typeof target === "string"
+    ? { kind: "exe", key: target.toLowerCase() }
+    : target;
+}
+
+function sessionMatchesLocalLink(
+  session: Pick<Session, "exeName" | "gameId" | "source">,
+  link: LocalLink,
+) {
+  return (
+    session.exeName.toLowerCase() === link.exeName.toLowerCase() &&
+    session.source === "custom" &&
+    (link.ref.kind === "exe" || session.gameId === link.gameId)
+  );
+}
+
+function setCommunitySuggestionRejected(
+  target: string | LocalLinkRef,
+  note?: string,
+) {
+  const ref = localLinkRef(target);
   useAppStore.setState((state) => {
-    const existing = state.exeCache.get(key);
-    if (existing?.state !== "matched" || existing.source !== "custom") {
+    const existing = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
+    if (existing?.source !== "custom") {
       return {};
     }
 
-    const exeCache = new Map(state.exeCache);
-    exeCache.set(key, {
-      ...existing,
+    const maps = writeLocalLink(state, ref, {
       pendingCommunityGame: undefined,
       communitySuggestionVerified: false,
       communitySuggestionStatus: "rejected",
       communitySuggestionNote: note,
     });
     return {
-      exeCache,
+      ...maps,
       activeSessions: state.activeSessions.map((session) =>
-        session.exeName.toLowerCase() === key && session.source === "custom"
+        sessionMatchesLocalLink(session, existing)
           ? {
               ...session,
               communitySuggestionVerified: false,
@@ -1682,7 +3046,7 @@ function setCommunitySuggestionRejected(exeName: string, note?: string) {
           : session,
       ),
       recentSessions: state.recentSessions.map((session) =>
-        session.exeName.toLowerCase() === key && session.source === "custom"
+        sessionMatchesLocalLink(session, existing)
           ? {
               ...session,
               communitySuggestionVerified: false,
@@ -1693,43 +3057,87 @@ function setCommunitySuggestionRejected(exeName: string, note?: string) {
       ),
     };
   });
-  logRuntime(`community suggestion rejected ${exeName}`);
+  const link = findLocalLink(
+    ref,
+    useAppStore.getState().exeCache,
+    useAppStore.getState().scopedExeLinks,
+  );
+  logRuntime(`community suggestion rejected ${link?.exeName ?? ref.key}`);
   persist();
 }
 
-export function markCommunitySuggestionRejected(
-  exeName: string,
-  note?: string,
-) {
-  setCommunitySuggestionRejected(exeName, note);
+function communitySuggestionIdentityKey(ref: LocalLinkRef, gameId: number) {
+  return `${ref.kind}:${ref.key}:${gameId}`;
 }
 
-function setCommunitySuggestionMarker(
-  exeName: string,
-  game: Game,
-  verified: boolean,
-) {
+function clearCommunitySuggestionMarker(ref: LocalLinkRef, gameId: number) {
   useAppStore.setState((state) => {
-    const key = exeName.toLowerCase();
-    const existing = state.exeCache.get(key);
-    if (existing?.state !== "matched" || existing.source !== "custom") {
+    const existing = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
+    if (
+      existing?.source !== "custom" ||
+      existing.communitySuggestionId !== gameId
+    ) {
       return {};
     }
 
-    const exeCache = new Map(state.exeCache);
-    exeCache.set(key, {
-      ...existing,
+    const maps = writeLocalLink(state, ref, {
+      pendingCommunityGame: undefined,
+      communitySuggestionId: undefined,
+      communitySuggestionVerified: undefined,
+      communitySuggestionStatus: undefined,
+      communitySuggestionNote: undefined,
+    });
+    const clearSession = <T extends ActiveSession | Session>(session: T): T =>
+      sessionMatchesLocalLink(session, existing) &&
+      session.communitySuggestionId === gameId
+        ? {
+            ...session,
+            communitySuggestionId: undefined,
+            communitySuggestionVerified: undefined,
+            communitySuggestionStatus: undefined,
+            communitySuggestionNote: undefined,
+          }
+        : session;
+    return {
+      ...maps,
+      activeSessions: state.activeSessions.map(clearSession),
+      recentSessions: state.recentSessions.map(clearSession),
+    };
+  });
+}
+
+export function markCommunitySuggestionRejected(
+  target: string | LocalLinkRef,
+  note?: string,
+) {
+  setCommunitySuggestionRejected(target, note);
+}
+
+function setCommunitySuggestionMarker(
+  target: string | LocalLinkRef,
+  game: Game,
+  verified: boolean,
+) {
+  const ref = localLinkRef(target);
+  useAppStore.setState((state) => {
+    const existing = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
+    if (existing?.source !== "custom") {
+      return {};
+    }
+
+    const maps = writeLocalLink(state, ref, {
       igdbId: game.igdbId ?? existing.igdbId,
       pendingCommunityGame: verified ? undefined : game,
       communitySuggestionId: game.id,
       communitySuggestionVerified: verified,
       communitySuggestionStatus: verified ? "verified" : "pending",
       communitySuggestionNote: undefined,
+      shareState: undefined,
     });
     return {
-      exeCache,
+      ...maps,
       activeSessions: state.activeSessions.map((session) =>
-        session.exeName.toLowerCase() === key && session.source === "custom"
+        sessionMatchesLocalLink(session, existing)
           ? {
               ...session,
               igdbId: game.igdbId ?? session.igdbId ?? existing.igdbId,
@@ -1741,7 +3149,7 @@ function setCommunitySuggestionMarker(
           : session,
       ),
       recentSessions: state.recentSessions.map((session) =>
-        session.exeName.toLowerCase() === key && session.source === "custom"
+        sessionMatchesLocalLink(session, existing)
           ? {
               ...session,
               igdbId: game.igdbId ?? session.igdbId ?? existing.igdbId,
@@ -1760,9 +3168,17 @@ function setCommunitySuggestionMarker(
   canonicalizeSharedCustomGames(game.id);
 }
 
-function setCommunitySuggestionApproved(exeName: string, game: Game) {
-  setCommunitySuggestionMarker(exeName, game, true);
-  logRuntime(`community suggestion approved ${exeName} -> ${game.name}`);
+function setCommunitySuggestionApproved(
+  target: string | LocalLinkRef,
+  game: Game,
+) {
+  const ref = localLinkRef(target);
+  const state = useAppStore.getState();
+  const link = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
+  setCommunitySuggestionMarker(ref, game, true);
+  logRuntime(
+    `community suggestion approved ${link?.exeName ?? ref.key} -> ${game.name}`,
+  );
   persist();
 }
 
@@ -1907,6 +3323,54 @@ export function applyGameMatch(exeName: string, game: Game) {
   void requestProcessScan("after game match applied");
 }
 
+// Applies a verified server identity without widening a path-scoped choice to
+// a global basename claim.
+export function applyLocalLinkGameMatch(
+  target: string | LocalLinkRef,
+  game: Game,
+) {
+  const ref = localLinkRef(target);
+  if (ref.kind === "exe") {
+    applyGameMatch(ref.key, game);
+    return;
+  }
+  useAppStore.setState((state) => {
+    const existing = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
+    if (!existing) return {};
+    const maps = writeLocalLink(state, ref, {
+      gameId: game.id,
+      igdbId: game.igdbId ?? existing.igdbId,
+      gameName: game.name,
+      coverUrl: game.coverUrl,
+      source: game.source,
+      identifierSource: game.source,
+      pendingCommunityGame: undefined,
+      communitySuggestionId: undefined,
+      communitySuggestionVerified: undefined,
+      communitySuggestionStatus: undefined,
+      communitySuggestionNote: undefined,
+      shareState: undefined,
+    });
+    const updateSession = <T extends ActiveSession | Session>(session: T): T =>
+      sessionMatchesLocalLink(session, existing)
+        ? {
+            ...session,
+            gameId: game.id,
+            igdbId: game.igdbId ?? existing.igdbId,
+            gameName: game.name,
+            coverUrl: game.coverUrl,
+            source: game.source,
+          }
+        : session;
+    return {
+      ...maps,
+      activeSessions: state.activeSessions.map(updateSession),
+      recentSessions: state.recentSessions.map(updateSession),
+    };
+  });
+  persist();
+}
+
 // Applies a database game directly to an exe - used when a community
 // suggestion turned out to be an already-known IGDB match. Handles both
 // unmatched exes (Discovered) and already matched ones (library).
@@ -1933,7 +3397,7 @@ export async function findGameMatches(
 ): Promise<GameMatchLookup> {
   const state = useAppStore.getState();
   const process: ProcessSnapshot = { exeName, exePath: null };
-  const response = await fetchWithTimeout(
+  const response = await requestJsonResponse<MatchProcessesResponse>(
     `${state.settings.apiEndpoint}/api/match-processes`,
     {
       method: "POST",
@@ -1953,7 +3417,7 @@ export async function findGameMatches(
     throw new Error(`${response.status} ${response.statusText}`);
   }
 
-  const body = (await response.json()) as MatchProcessesResponse;
+  const body = response.data;
   const result = body.matches.find(
     (match) => match.key.toLowerCase() === processCacheKey(process),
   );
@@ -2006,18 +3470,16 @@ export async function searchEmulatorGames(
   const endpoint = useAppStore
     .getState()
     .settings.apiEndpoint.replace(/\/+$/, "");
-  const response = await fetchWithTimeout(
+  const response = await requestJsonResponse<GameMetadataResponse>(
     `${endpoint}/api/emulator/games/search?emulatorId=${encodeURIComponent(emulatorId)}&query=${encodeURIComponent(value)}`,
     { timeoutMs: API_REQUEST_TIMEOUT_MS },
   );
   if (!response.ok)
     throw new Error(`${response.status} ${response.statusText}`);
-  return ((await response.json()) as GameMetadataResponse).games.map(
-    (game) => ({
-      ...game,
-      source: game.source ?? "igdb",
-    }),
-  );
+  return response.data.games.map((game) => ({
+    ...game,
+    source: game.source ?? "igdb",
+  }));
 }
 
 export type EmulatorShareOutcome =
@@ -2062,18 +3524,19 @@ export async function shareEmulatorMapping(
 
   const endpoint = `${state.settings.apiEndpoint.replace(/\/+$/, "")}/api/emulator/suggestions`;
   try {
-    const response = await fetchWithTimeout(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      timeoutMs: API_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify({
-        emulatorId: mapping.emulatorId,
-        contentKind: mapping.contentKind,
-        contentValue: mapping.contentValue,
-        gameId: mapping.gameId,
-        installUuid: context.installUuid,
-      }),
-    });
+    const response =
+      await requestJsonResponse<EmulatorContentSuggestionResponse>(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        timeoutMs: API_REQUEST_TIMEOUT_MS,
+        body: JSON.stringify({
+          emulatorId: mapping.emulatorId,
+          contentKind: mapping.contentKind,
+          contentValue: mapping.contentValue,
+          gameId: mapping.gameId,
+          installUuid: context.installUuid,
+        }),
+      });
     if (response.status === 404 || response.status === 501) {
       emulatorSharingUnavailableUntil = Date.now() + 30 * 60_000;
       return { kind: "unavailable" };
@@ -2081,7 +3544,7 @@ export async function shareEmulatorMapping(
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
-    const body = (await response.json()) as EmulatorContentSuggestionResponse;
+    const body = response.data;
     if (
       body.status !== "pending" &&
       body.status !== "rejected" &&
@@ -2405,12 +3868,20 @@ function observationFromMapping(
 export function convertLocalSuggestionToCommunity(exeName: string) {
   const state = useAppStore.getState();
   const key = exeName.toLowerCase();
-  const existing = state.exeCache.get(key);
+  const existing = findLocalLinksByExe(
+    exeName,
+    state.exeCache,
+    state.scopedExeLinks,
+  ).find(
+    (link) =>
+      link.source === "custom" &&
+      link.communitySuggestionId !== undefined &&
+      link.communitySuggestionVerified === true,
+  );
   if (
-    existing?.state !== "matched" ||
-    existing.source !== "custom" ||
-    !existing.communitySuggestionId ||
-    !existing.communitySuggestionVerified
+    !existing ||
+    existing.communitySuggestionId === undefined ||
+    existing.communitySuggestionVerified !== true
   ) {
     return;
   }
@@ -2424,22 +3895,43 @@ export function convertLocalSuggestionToCommunity(exeName: string) {
     source: "community",
   };
 
-  state.setExeCacheEntry({
-    exeName: existing.exeName,
-    state: "matched",
-    gameId: communityGame.id,
-    igdbId: communityGame.igdbId,
-    gameName: communityGame.name,
-    coverUrl: communityGame.coverUrl,
-    source: "community",
-    communitySuggestionId: existing.communitySuggestionId,
-    communitySuggestionVerified: true,
-    communitySuggestionStatus: "verified",
-    communitySuggestionNote: undefined,
-    lastCheckedAt: new Date().toISOString(),
-  });
+  const lastCheckedAt = new Date().toISOString();
+  const maps = writeLocalLink(
+    {
+      exeCache: state.exeCache,
+      scopedExeLinks: state.scopedExeLinks,
+    },
+    existing.ref,
+    {
+      gameId: communityGame.id,
+      igdbId: communityGame.igdbId,
+      gameName: communityGame.name,
+      coverUrl: communityGame.coverUrl,
+      source: "community",
+      identifierSource: "community",
+      communitySuggestionId: existing.communitySuggestionId,
+      communitySuggestionVerified: true,
+      communitySuggestionStatus: "verified",
+      communitySuggestionNote: undefined,
+    },
+  );
+  if (existing.ref.kind === "exe") {
+    const cacheEntry = maps.exeCache.get(existing.ref.key);
+    if (cacheEntry) {
+      maps.exeCache.set(existing.ref.key, { ...cacheEntry, lastCheckedAt });
+    }
+  }
+
+  const libraryImports = new Map(state.libraryImports);
+  reconcileLibraryImportIdentifierSources(
+    libraryImports,
+    maps.exeCache,
+    maps.scopedExeLinks,
+  );
 
   useAppStore.setState((current) => ({
+    ...maps,
+    libraryImports,
     activeSessions: current.activeSessions.map((session) =>
       session.exeName.toLowerCase() === key && session.source === "custom"
         ? {
@@ -2553,6 +4045,14 @@ function cacheAmbiguousMatch(
     lastCheckedAt: new Date().toISOString(),
     flagReason,
   });
+  if (!existing) {
+    emitOverlayEvent({
+      type: "choice-required",
+      exeName: process.exeName,
+      candidateCount: candidates.length,
+      targetPids: process.pid ? [process.pid] : undefined,
+    });
+  }
   state.addApiRequestLogEntry({
     endpoint: state.settings.apiEndpoint,
     exeName: process.exeName,
@@ -2564,9 +4064,10 @@ function cacheAmbiguousMatch(
   );
 }
 
-function resolveCachedProcess(
+export function resolveCachedProcess(
   process: ProcessSnapshot,
   exeCache: Map<string, ExeCacheEntry>,
+  scopedExeLinks: Map<string, ScopedExeLink>,
   now: number,
   ttlMs: number,
 ): CachedResolution {
@@ -2574,9 +4075,24 @@ function resolveCachedProcess(
   const cached = exeCache.get(exeKey);
 
   if (cached?.state === "blacklisted") return { state: "skipped" };
+  const scoped = resolveScopedLink(process, scopedExeLinks);
+  if (scoped) {
+    return {
+      state: "matched",
+      via: "scoped",
+      game: {
+        id: scoped.gameId,
+        igdbId: scoped.igdbId,
+        name: scoped.gameName,
+        coverUrl: scoped.coverUrl,
+        source: scoped.source,
+      },
+    };
+  }
   if (cached?.state === "matched" && cached.gameId && cached.gameName) {
     return {
       state: "matched",
+      via: "cache",
       game: {
         id: cached.gameId,
         igdbId: cached.igdbId,
@@ -2804,6 +4320,7 @@ function startSession(
     const resolver = createGameIdentityResolver(
       state.gameMetadata,
       state.exeCache,
+      state.libraryImports,
     );
     const firstAutoDetection = state.recordAutomaticDetection(
       autoDetectionKeys(
@@ -2838,6 +4355,17 @@ export function selectAmbiguousMatch(exeName: string, game: Game) {
   if (!ambiguous) return;
 
   cacheMatchResult(ambiguous.exeName, game);
+  if (
+    state.settings.rememberLaunchPaths !== false &&
+    isWindowsExecutablePath(ambiguous.exePath) &&
+    !isVolatileLaunchPath(ambiguous.exePath)
+  ) {
+    state.setLaunchTarget({
+      exeName: ambiguous.exeName,
+      path: ambiguous.exePath,
+      owner: { gameId: game.id, source: game.source ?? null },
+    });
+  }
   state.removeAmbiguousMatch(ambiguous.exeName);
   // The picked game may already be tracked through one of its other
   // executables; then this exe joins that session instead of adding a second.
@@ -2903,16 +4431,19 @@ async function submitIdentifierReport(
       installUuid: state.installUuid,
       ...gameIdentity,
     };
-    const response = await fetchWithTimeout(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      timeoutMs: API_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify(payload),
-    });
+    const response = await requestJsonResponse<IdentifierReportResponse>(
+      endpoint,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        timeoutMs: API_REQUEST_TIMEOUT_MS,
+        body: JSON.stringify(payload),
+      },
+    );
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
-    const result = (await response.json()) as IdentifierReportResponse;
+    const result = response.data;
     state.addApiRequestLogEntry({
       endpoint,
       exeName,
@@ -2971,6 +4502,7 @@ async function ignoreProcessLocally(
     removeActiveSession(session);
   }
   state.removeExeCacheEntry(exeName);
+  state.removeLaunchTarget(exeName);
   state.removeAmbiguousMatch(exeName);
   persist();
 
@@ -3058,16 +4590,19 @@ async function submitIgnoredProcessReport(
       platform: currentPlatform(),
       installUuid,
     };
-    const response = await fetchWithTimeout(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      timeoutMs: API_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify(payload),
-    });
+    const response = await requestJsonResponse<IgnoredProcessReportResponse>(
+      endpoint,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        timeoutMs: API_REQUEST_TIMEOUT_MS,
+        body: JSON.stringify(payload),
+      },
+    );
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
-    const result = (await response.json()) as IgnoredProcessReportResponse;
+    const result = response.data;
     state.addApiRequestLogEntry({
       endpoint,
       exeName,
@@ -3102,7 +4637,6 @@ export async function dismissAmbiguousMatch(exeName: string) {
 type SessionEndReason =
   | "process-ended"
   | "recovered-checkpoint"
-  | "stale-timeout"
   | "settings-change"
   | "route-change";
 
@@ -3155,23 +4689,6 @@ async function endSession(
   );
 }
 
-async function closeStaleSession() {
-  const activeSessions = useAppStore.getState().activeSessions;
-  if (activeSessions.length === 0) {
-    verboseRuntime("stale session check skipped; no active sessions");
-    return;
-  }
-  for (const active of activeSessions) {
-    const ageMs = Date.now() - Date.parse(active.startedAt);
-    logRuntime(
-      `stale session check ${active.gameName} (${active.exeName}) activeAgeMs=${ageMs}`,
-    );
-    if (ageMs > 4 * 60 * 60 * 1000) {
-      await endSession(active, active.checkpointedAt, "stale-timeout");
-    }
-  }
-}
-
 function scheduleBackendHealthChecks() {
   if (backendHealthTimer) window.clearInterval(backendHealthTimer);
   backendHealthTimer = undefined;
@@ -3183,7 +4700,7 @@ function scheduleBackendHealthChecks() {
   logRuntime("backend health checks scheduled");
 }
 
-async function checkBackendHealth() {
+export async function checkBackendHealth() {
   const state = useAppStore.getState();
   const endpoint = state.settings.apiEndpoint.replace(/\/+$/, "");
   if (
@@ -3194,24 +4711,65 @@ async function checkBackendHealth() {
   }
 
   try {
-    const response = await fetchWithTimeout(`${endpoint}/health`, {
-      cache: "no-store",
-      timeoutMs: BACKEND_HEALTH_TIMEOUT_MS,
-    });
+    const response = await requestJsonResponse<{ ok?: boolean }>(
+      `${endpoint}/health`,
+      {
+        cache: "no-store",
+        timeoutMs: BACKEND_HEALTH_TIMEOUT_MS,
+      },
+    );
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
 
-    const body = (await response.json()) as { ok?: boolean };
+    const body = response.data;
     if (body.ok !== true) throw new Error("Health check returned not ok");
 
     setBackendHealth("online", "Backend health check passed");
+    await sendInstallPresenceIfDue();
   } catch (error) {
     const detail =
-      error instanceof DOMException && error.name === "AbortError"
+      error instanceof DOMException &&
+      (error.name === "AbortError" || error.name === "TimeoutError")
         ? "Health check timed out"
         : formatError(error);
     setBackendHealth("offline", detail);
+  }
+}
+
+async function sendInstallPresenceIfDue() {
+  if (installPresencePingInFlight) return installPresencePingInFlight;
+
+  installPresencePingInFlight = (async () => {
+    const state = useAppStore.getState();
+    const marker = await reportInstallPresence({
+      installUuid: state.installUuid,
+      apiEndpoint: state.settings.apiEndpoint,
+      marker: state.installPresenceMarker,
+      request: async (endpoint, payload) => {
+        const response = await requestWithTimeout(
+          `${endpoint}/api/install-presence`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload satisfies InstallPresencePayload),
+            timeoutMs: API_REQUEST_TIMEOUT_MS,
+          },
+          (response) => ({ ok: response.ok, status: response.status }),
+        );
+        return response;
+      },
+    });
+    if (marker && marker !== state.installPresenceMarker) {
+      useAppStore.getState().setInstallPresenceMarker(marker);
+      logRuntime(`install presence marker updated kind=${marker.kind}`);
+    }
+  })();
+
+  try {
+    await installPresencePingInFlight;
+  } finally {
+    installPresencePingInFlight = undefined;
   }
 }
 
@@ -3390,13 +4948,13 @@ export async function pollContributions(
   try {
     const pollStartedAt = Date.now();
     const params = new URLSearchParams({ installUuid });
-    const response = await fetchWithTimeout(
+    const response = await requestJsonResponse<ContributionsResponse>(
       `${state.settings.apiEndpoint}/api/community/contributions?${params}`,
       { timeoutMs: API_REQUEST_TIMEOUT_MS },
     );
     if (!response.ok)
       throw new Error(`${response.status} ${response.statusText}`);
-    const body = (await response.json()) as ContributionsResponse;
+    const body = response.data;
     const previous = useAppStore.getState().seenContributionStatus;
     const arrived: AppNotification[] = [];
     const seenContributionStatus = { ...previous };
@@ -3430,7 +4988,44 @@ export async function pollContributions(
 
     const delivered = suppressNotifications ? [] : arrived;
     useAppStore.setState((current) => {
-      const exeCache = applyContributionMarkers(current.exeCache, body.items);
+      let localLinks = applyContributionMarkers(
+        {
+          exeCache: current.exeCache,
+          scopedExeLinks: current.scopedExeLinks,
+        },
+        body.items,
+      );
+      for (const [identityKey, guard] of communitySuggestionCancelGuard) {
+        const exeKey = guard.exeName.toLowerCase();
+        const stillPending = body.items.some(
+          (item) =>
+            item.value.toLowerCase() === exeKey &&
+            item.gameId === guard.gameId &&
+            item.status === "pending",
+        );
+        if (!stillPending) {
+          communitySuggestionCancelGuard.delete(identityKey);
+          continue;
+        }
+
+        const entry = findLocalLink(
+          guard.ref,
+          localLinks.exeCache,
+          localLinks.scopedExeLinks,
+        );
+        if (
+          entry?.source === "custom" &&
+          entry.communitySuggestionId === guard.gameId
+        ) {
+          localLinks = writeLocalLink(localLinks, guard.ref, {
+            pendingCommunityGame: undefined,
+            communitySuggestionId: undefined,
+            communitySuggestionVerified: undefined,
+            communitySuggestionStatus: undefined,
+            communitySuggestionNote: undefined,
+          });
+        }
+      }
       const updateSession = <T extends ActiveSession | Session>(
         session: T,
       ): T => {
@@ -3496,7 +5091,7 @@ export async function pollContributions(
         }
       }
       return {
-        exeCache,
+        ...localLinks,
         activeSessions: current.activeSessions.map(updateSession),
         recentSessions: current.recentSessions.map(updateSession),
         emulatorMappings,
@@ -3568,12 +5163,14 @@ export function evaluateAndStoreMilestones(
   const resolveIgdbId = createGameIdentityResolver(
     state.gameMetadata,
     state.exeCache,
+    state.libraryImports,
   );
   const result = evaluateMilestones({
     sessions: state.recentSessions,
     archivedSeconds: state.archivedSeconds,
     archivedGameSeconds: state.archivedGameSeconds,
     playtimeAdjustments: state.playtimeAdjustments,
+    providerFloors: providerFloors(state.libraryImports.values()),
     verifiedContributions: state.contributionCounts.verified,
     verifiedEmulatorContributions: state.emulatorContributionCounts.verified,
     awardedMilestones: state.awardedMilestones,
@@ -3619,12 +5216,14 @@ function currentGameTotalSeconds(session: ActiveSession) {
   const resolver = createGameIdentityResolver(
     state.gameMetadata,
     state.exeCache,
+    state.libraryImports,
   );
   const metrics = milestoneMetrics({
     sessions: state.recentSessions,
     archivedSeconds: state.archivedSeconds,
     archivedGameSeconds: state.archivedGameSeconds,
     playtimeAdjustments: state.playtimeAdjustments,
+    providerFloors: providerFloors(state.libraryImports.values()),
     verifiedContributions: state.contributionCounts.verified,
     resolveIgdbId: resolver,
   });
@@ -3635,8 +5234,36 @@ function currentGameTotalSeconds(session: ActiveSession) {
 export function applyContributionMarkers(
   current: Map<string, ExeCacheEntry>,
   contributions: Contribution[],
+): Map<string, ExeCacheEntry>;
+export function applyContributionMarkers(
+  current: {
+    exeCache: Map<string, ExeCacheEntry>;
+    scopedExeLinks: Map<string, ScopedExeLink>;
+  },
+  contributions: Contribution[],
+): {
+  exeCache: Map<string, ExeCacheEntry>;
+  scopedExeLinks: Map<string, ScopedExeLink>;
+};
+export function applyContributionMarkers(
+  current:
+    | Map<string, ExeCacheEntry>
+    | {
+        exeCache: Map<string, ExeCacheEntry>;
+        scopedExeLinks: Map<string, ScopedExeLink>;
+      },
+  contributions: Contribution[],
 ) {
-  const exeCache = new Map(current);
+  const legacy = current instanceof Map;
+  let maps = legacy
+    ? {
+        exeCache: new Map(current),
+        scopedExeLinks: new Map<string, ScopedExeLink>(),
+      }
+    : {
+        exeCache: new Map(current.exeCache),
+        scopedExeLinks: new Map(current.scopedExeLinks),
+      };
   const byExe = new Map<string, Contribution[]>();
   for (const contribution of contributions) {
     const key = contribution.value.toLowerCase();
@@ -3644,45 +5271,49 @@ export function applyContributionMarkers(
   }
 
   for (const [exeKey, candidates] of byExe) {
-    const entry = exeCache.get(exeKey);
-    if (entry?.state !== "matched" || entry.source !== "custom") continue;
-
-    let contribution = candidates.find(
-      (candidate) => candidate.gameId === entry.communitySuggestionId,
+    const links = findLocalLinksByExe(
+      exeKey,
+      maps.exeCache,
+      maps.scopedExeLinks,
     );
-    if (!contribution && entry.communitySuggestionId === undefined) {
-      const viable = candidates.filter((candidate) => {
-        const namesMatch =
-          candidate.gameName.trim().toLowerCase() ===
-          (entry.gameName ?? "").trim().toLowerCase();
-        const coversMatch =
-          !candidate.coverUrl ||
-          !entry.coverUrl ||
-          candidate.coverUrl === entry.coverUrl;
-        return namesMatch && coversMatch;
-      });
-      if (viable.length === 1) contribution = viable[0];
-    }
-    if (!contribution) continue;
+    for (const entry of links) {
+      let contribution = candidates.find(
+        (candidate) => candidate.gameId === entry.communitySuggestionId,
+      );
+      if (!contribution && entry.communitySuggestionId === undefined) {
+        const viable = candidates.filter((candidate) => {
+          const namesMatch =
+            candidate.gameName.trim().toLowerCase() ===
+            (entry.gameName ?? "").trim().toLowerCase();
+          const coversMatch =
+            !candidate.coverUrl ||
+            !entry.coverUrl ||
+            candidate.coverUrl === entry.coverUrl;
+          return namesMatch && coversMatch;
+        });
+        if (viable.length === 1) contribution = viable[0];
+      }
+      if (!contribution) continue;
 
-    exeCache.set(exeKey, {
-      ...entry,
-      pendingCommunityGame:
-        contribution.status === "pending"
-          ? {
-              id: contribution.gameId,
-              name: contribution.gameName,
-              coverUrl: contribution.coverUrl,
-              source: "community",
-            }
-          : undefined,
-      communitySuggestionId: contribution.gameId,
-      communitySuggestionVerified: contribution.status === "verified",
-      communitySuggestionStatus: contribution.status,
-      communitySuggestionNote: contribution.reviewNote,
-    });
+      maps = writeLocalLink(maps, entry.ref, {
+        pendingCommunityGame:
+          contribution.status === "pending"
+            ? {
+                id: contribution.gameId,
+                name: contribution.gameName,
+                coverUrl: contribution.coverUrl,
+                source: "community",
+              }
+            : undefined,
+        communitySuggestionId: contribution.gameId,
+        communitySuggestionVerified: contribution.status === "verified",
+        communitySuggestionStatus: contribution.status,
+        communitySuggestionNote: contribution.reviewNote,
+        shareState: undefined,
+      });
+    }
   }
-  return exeCache;
+  return legacy ? maps.exeCache : maps;
 }
 
 export async function recheckExecutable(exeName: string) {
@@ -3731,6 +5362,13 @@ export function addSharedCustomGame(
 ) {
   const normalizedGameName = gameName.trim();
   if (!normalizedGameName) return null;
+
+  communitySuggestionCancelGuard.delete(
+    communitySuggestionIdentityKey(
+      localLinkRef(exeName),
+      communitySuggestionId,
+    ),
+  );
 
   const game: Game = {
     // Every executable suggested for the same game shares the suggestion id,
@@ -3866,21 +5504,154 @@ export function convertToCustomGame(exeName: string, gameName: string) {
   logRuntime(`converted to custom game ${exeName} -> ${normalizedGameName}`);
 }
 
+export type CommunitySuggestionCancelOutcome =
+  | { kind: "cancelled" }
+  | { kind: "not-pending" }
+  | { kind: "not-owner" }
+  | { kind: "offline" }
+  | { kind: "unavailable" }
+  | { kind: "failed"; error: string };
+
+export async function cancelCommunitySuggestion(
+  target: string | LocalLinkRef,
+  expectedGameId: number,
+): Promise<CommunitySuggestionCancelOutcome> {
+  const state = useAppStore.getState();
+  const ref = localLinkRef(target);
+  const existing = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
+  if (
+    !existing ||
+    existing.communitySuggestionId !== expectedGameId ||
+    !canCancelCommunitySuggestion({
+      source: existing.source,
+      exeName: existing.exeName,
+      communitySuggestionId: existing.communitySuggestionId,
+      communitySuggestionVerified: existing.communitySuggestionVerified,
+      communitySuggestionStatus: existing.communitySuggestionStatus,
+    })
+  ) {
+    return { kind: "not-pending" };
+  }
+  if (isOfflineStatus(state.backendHealth.status)) {
+    return { kind: "offline" };
+  }
+  if (!state.installUuid) {
+    return { kind: "failed", error: "No install identity available." };
+  }
+  if (Date.now() < communityCancelUnavailableUntil) {
+    return { kind: "unavailable" };
+  }
+
+  const endpoint = `${state.settings.apiEndpoint.replace(/\/+$/, "")}/api/community/suggestions/cancel`;
+  const payload: CommunitySuggestionCancelPayload = {
+    exeName: existing.exeName,
+    gameId: expectedGameId,
+    installUuid: state.installUuid,
+  };
+  try {
+    const response =
+      await requestJsonResponse<CommunitySuggestionCancelResponse>(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        timeoutMs: API_REQUEST_TIMEOUT_MS,
+        body: JSON.stringify(payload),
+      });
+    if (response.status === 404 || response.status === 501) {
+      communityCancelUnavailableUntil = Date.now() + 30 * 60_000;
+      return { kind: "unavailable" };
+    }
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+
+    const body = response.data;
+    state.addApiRequestLogEntry({
+      endpoint,
+      exeName: existing.exeName,
+      status: "matched",
+      detail: `Suggestion cancel ${body.status}`,
+    });
+    if (body.status === "cancelled" || body.status === "not_found") {
+      communitySuggestionCancelGuard.set(
+        communitySuggestionIdentityKey(ref, expectedGameId),
+        { ref, exeName: existing.exeName, gameId: expectedGameId },
+      );
+      clearCommunitySuggestionMarker(ref, expectedGameId);
+      logRuntime(
+        `community suggestion cancelled ${existing.exeName} -> ${expectedGameId}`,
+      );
+      persist();
+      return { kind: "cancelled" };
+    }
+    if (body.status === "not_owner") {
+      return { kind: "not-owner" };
+    }
+
+    void pollContributions("after suggestion cancel not-pending");
+    return { kind: "not-pending" };
+  } catch (error) {
+    const detail = formatError(error);
+    state.addApiRequestLogEntry({
+      endpoint,
+      exeName: existing.exeName,
+      status: "error",
+      detail,
+    });
+    logRuntime(
+      `community suggestion cancel failed ${existing.exeName}: ${detail}`,
+    );
+    return { kind: "failed", error: detail };
+  }
+}
+
 // Suggests the correct game for a tracked exe to the community. Custom games
 // are shared as-is; for igdb/community games this is the "report wrong match"
 // path - the exe is retagged locally as a shared custom game carrying the
 // suggested metadata and the awaiting-approval marker.
 export function suggestTrackedGameToCommunity(
-  exeName: string,
+  target: string | LocalLinkRef,
   gameName: string,
   coverUrl: string,
   communitySuggestionId: number,
   communitySuggestionVerified: boolean,
   igdbId?: number,
 ) {
-  const existing = useAppStore.getState().exeCache.get(exeName.toLowerCase());
-  if (existing?.state !== "matched") return null;
+  const ref = localLinkRef(target);
+  const current = useAppStore.getState();
+  const existing = findLocalLink(ref, current.exeCache, current.scopedExeLinks);
+  if (!existing) return null;
+  const exeName = existing.exeName;
   if (existing.source === "custom") {
+    if (ref.kind === "scoped") {
+      const normalizedName = gameName.trim();
+      if (!normalizedName) return null;
+      useAppStore.setState((state) =>
+        writeLocalLink(state, ref, {
+          gameName: normalizedName,
+          coverUrl,
+          igdbId: igdbId ?? existing.igdbId,
+        }),
+      );
+      setCommunitySuggestionMarker(
+        ref,
+        {
+          id: communitySuggestionId,
+          igdbId,
+          name: normalizedName,
+          coverUrl,
+          source: "community",
+        },
+        communitySuggestionVerified,
+      );
+      persist();
+      return {
+        id: existing.gameId,
+        igdbId: igdbId ?? existing.igdbId,
+        name: normalizedName,
+        coverUrl,
+        source: "custom" as const,
+      };
+    }
     return shareTrackedCustomGame(
       exeName,
       gameName,
@@ -3899,6 +5670,7 @@ export function suggestTrackedGameToCommunity(
     source: "custom",
   };
   if (!customGame.name) return null;
+  if (ref.kind === "scoped") return null;
   applyGameMatch(exeName, customGame);
   setCommunitySuggestionMarker(
     exeName,
@@ -3916,6 +5688,89 @@ export function suggestTrackedGameToCommunity(
   );
   persist();
   return customGame;
+}
+
+export type LocalLinkShareOutcome =
+  | { kind: "submitted" | "already-known" | "rejected" }
+  | { kind: "not-applicable" }
+  | { kind: "failed"; error: string };
+
+export async function submitLocalLinkToCommunity(
+  ref: LocalLinkRef,
+  signal?: AbortSignal,
+): Promise<LocalLinkShareOutcome> {
+  signal?.throwIfAborted();
+  const state = useAppStore.getState();
+  const link = findLocalLink(ref, state.exeCache, state.scopedExeLinks);
+  if (
+    link?.source !== "custom" ||
+    link.communitySuggestionId !== undefined ||
+    !link.gameName
+  ) {
+    return { kind: "not-applicable" };
+  }
+  const endpoint = `${state.settings.apiEndpoint.replace(/\/+$/, "")}/api/community/suggestions`;
+  try {
+    const response = await requestJsonResponse<CommunityGameSuggestionResponse>(
+      endpoint,
+      {
+        signal,
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        timeoutMs: API_REQUEST_TIMEOUT_MS,
+        body: JSON.stringify({
+          exeName: link.exeName,
+          name: link.gameName,
+          coverUrl: link.coverUrl,
+          igdbId: link.igdbId,
+          installUuid: state.installUuid ?? undefined,
+        }),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    const result = response.data;
+    signal?.throwIfAborted();
+    if (result.igdbGame) {
+      applyLocalLinkGameMatch(ref, result.igdbGame);
+      return { kind: "already-known" };
+    }
+    if (result.id === undefined) throw new Error("Unexpected response");
+    if (result.verified) {
+      // This match was approved before the import. Apply it as database truth
+      // instead of making the imported link look like a freshly approved
+      // suggestion that still needs a Level up action.
+      applyLocalLinkGameMatch(ref, {
+        id: result.id,
+        igdbId: link.igdbId,
+        name: link.gameName,
+        coverUrl: link.coverUrl ?? "",
+        source: "community",
+      });
+      return { kind: "already-known" };
+    }
+    suggestTrackedGameToCommunity(
+      ref,
+      link.gameName,
+      link.coverUrl ?? "",
+      result.id,
+      result.verified ?? false,
+      link.igdbId,
+    );
+    if (result.rejected) {
+      markCommunitySuggestionRejected(ref, result.reviewNote);
+      return { kind: "rejected" };
+    }
+    return { kind: "submitted" };
+  } catch (error) {
+    signal?.throwIfAborted();
+    useAppStore.setState((current) =>
+      writeLocalLink(current, ref, { shareState: "failed" }),
+    );
+    persist();
+    return { kind: "failed", error: formatError(error) };
+  }
 }
 
 // Resolves an ambiguity picker with a locally created custom game - the
@@ -3991,6 +5846,13 @@ export function untrackCustomGame(exeName: string) {
   }
 
   state.removeExeCacheEntry(exeName);
+  state.removeLaunchTarget(exeName);
+  if (existing.gameId !== undefined) {
+    state.removeManualLaunchTarget({
+      gameId: existing.gameId,
+      source: existing.source ?? null,
+    });
+  }
   logRuntime(`custom game untracked ${exeName}`);
   persist();
   void requestProcessScan("after custom game untrack");
@@ -4003,6 +5865,44 @@ export function untrackGame(
   aliases: GameAliasRef[] = [{ gameId, source }],
 ) {
   untrackGameInternal(gameId, source, removeHistory, aliases, "remove");
+}
+
+export function forgetImportedLibraryData(provider: LibraryProviderId) {
+  const state = useAppStore.getState();
+  const exeCache = new Map(state.exeCache);
+  const launchTargets = new Map(state.launchTargets);
+  const libraryImports = new Map(state.libraryImports);
+  const libraryInstalls = new Map(state.libraryInstalls);
+  const scopedExeLinks = new Map(state.scopedExeLinks);
+  for (const [key, entry] of exeCache) {
+    if (entry.libraryProvider !== provider) continue;
+    exeCache.delete(key);
+    launchTargets.delete(key);
+  }
+  for (const [key, entry] of libraryImports) {
+    if (entry.provider === provider) libraryImports.delete(key);
+  }
+  for (const [key, entry] of libraryInstalls) {
+    if (entry.provider === provider) libraryInstalls.delete(key);
+  }
+  for (const [key, entry] of scopedExeLinks) {
+    if (entry.provider === provider) scopedExeLinks.delete(key);
+  }
+  backfillLibraryExecutableCache(
+    exeCache,
+    libraryImports.values(),
+    scopedExeLinks.values(),
+  );
+  useAppStore.setState({
+    exeCache,
+    launchTargets,
+    libraryImports,
+    libraryInstalls,
+    scopedExeLinks,
+  });
+  evaluateAndStoreMilestones({ suppressNotifications: true });
+  persist();
+  void requestProcessScan(`after ${provider} library cleared`);
 }
 
 function untrackGameInternal(
@@ -4032,6 +5932,11 @@ function untrackGameInternal(
 
   for (const exeName of matchingExeNames) {
     state.removeExeCacheEntry(exeName);
+    state.removeLaunchTarget(exeName);
+  }
+
+  for (const alias of aliases) {
+    state.removeManualLaunchTarget(alias);
   }
 
   for (const mapping of state.emulatorMappings.values()) {
@@ -4404,6 +6309,48 @@ export function clearFakeHistory() {
   persist();
 }
 
+// Developer-only reset for testing an empty installation's library without
+// changing app preferences, install identity, contribution state, or ignored
+// processes. Active sessions are intentionally discarded instead of being
+// finalized so a reset cannot immediately recreate cards through History.
+export function clearLocalLibrary() {
+  const state = useAppStore.getState();
+  const cleared = {
+    matches: state.exeCache.size,
+    sessions: state.recentSessions.length,
+    activeSessions: state.activeSessions.length,
+    emulatorMappings: state.emulatorMappings.size,
+  };
+
+  useAppStore.setState({
+    activeSessions: [],
+    ambiguousMatches: [],
+    emulatorObservations: [],
+    emulatorMappings: new Map(),
+    recentSessions: [],
+    gameMetadata: new Map(),
+    exeCache: new Map(),
+    launchTargets: new Map(),
+    manualLaunchTargets: new Map(),
+    emulatorAutoLaunchTargets: new Map(),
+    emulatorManualLaunchTargets: new Map(),
+    emulatorLaunchCandidates: new Map(),
+    archivedSeconds: 0,
+    archivedGameSeconds: {},
+    playtimeAdjustments: {},
+    autoDetectedGameKeys: [],
+    libraryImports: new Map(),
+    libraryInstalls: new Map(),
+    scopedExeLinks: new Map(),
+  });
+
+  logRuntime(
+    `local library cleared matches=${cleared.matches} sessions=${cleared.sessions} active=${cleared.activeSessions} emulatorMappings=${cleared.emulatorMappings}`,
+  );
+  evaluateAndStoreMilestones({ suppressNotifications: true });
+  return cleared;
+}
+
 function isFakeHistorySession(session: Session) {
   return (
     session.exeName.startsWith(FAKE_HISTORY_EXE_PREFIX) ||
@@ -4412,12 +6359,6 @@ function isFakeHistorySession(session: Session) {
     (session.id <= FAKE_HISTORY_SESSION_ID_BASE &&
       session.id > FAKE_HISTORY_SESSION_ID_BASE - 1_000)
   );
-}
-
-export function clearLocalCache() {
-  useAppStore.getState().clearCache();
-  logRuntime("local cache cleared");
-  persist();
 }
 
 export async function scanProcessesNow() {
@@ -4511,14 +6452,14 @@ export async function hydrateGameMetadata(
 
   const request = (async () => {
     try {
-      const response = await fetchWithTimeout(
+      const response = await requestJsonResponse<GameMetadataResponse>(
         `${state.settings.apiEndpoint}/api/games/metadata?ids=${missingIds.join(",")}`,
         { timeoutMs: API_REQUEST_TIMEOUT_MS },
       );
       if (!response.ok)
         throw new Error(`${response.status} ${response.statusText}`);
 
-      const body = (await response.json()) as GameMetadataResponse;
+      const body = response.data;
       const games = body.games.filter(
         (game): game is GameMetadata =>
           game.source === "igdb" || game.source === "community",
@@ -4634,7 +6575,11 @@ function stampCanonicalIdsFromMetadata(
       }
     }
 
-    const resolveIgdbId = createGameIdentityResolver(gameMetadata, exeCache);
+    const resolveIgdbId = createGameIdentityResolver(
+      gameMetadata,
+      exeCache,
+      state.libraryImports,
+    );
     let activeSessionsChanged = false;
     const repairedActiveSessions = state.activeSessions.map((session) => {
       const resolvedIgdbId = resolveIgdbId(
@@ -4803,10 +6748,32 @@ function collapseDuplicateActiveSessions() {
   return deduped;
 }
 
+function canResumeRecoveredSession(
+  session: ActiveSession,
+  processes: ProcessSnapshot[],
+) {
+  const checkpointMs = Date.parse(session.checkpointedAt);
+  if (!Number.isFinite(checkpointMs) || checkpointMs > Date.now()) return false;
+
+  // Matching the game alone is insufficient: it may have stopped and restarted
+  // during our absence. A currently running process that predates the last
+  // checkpoint proves continuity. Check all of the game's executables, not
+  // just the primary one (a launcher/client can exit while another remains).
+  // Missing/invalid start times cannot justify crediting an unobserved gap.
+  return processes.some(
+    ({ startedAtUnix }) =>
+      typeof startedAtUnix === "number" &&
+      Number.isFinite(startedAtUnix) &&
+      startedAtUnix > 0 &&
+      startedAtUnix * 1000 <= checkpointMs,
+  );
+}
+
 function checkpointActiveSessionIfDue(session: ActiveSession) {
   if (
+    !session.recoveredFromCheckpoint &&
     Date.now() - Date.parse(session.checkpointedAt) <
-    SESSION_CHECKPOINT_INTERVAL_MS
+      SESSION_CHECKPOINT_INTERVAL_MS
   ) {
     return;
   }
@@ -4909,11 +6876,7 @@ function sharedCustomGameId(exeName: string, communitySuggestionId: number) {
 }
 
 function customGameId(exeName: string) {
-  let hash = 0;
-  for (const char of exeName.toLowerCase()) {
-    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  }
-  return CUSTOM_GAME_ID_BASE - (hash % 900_000_000);
+  return customLocalGameId(exeName);
 }
 
 export function renameCustomGame(gameId: number, gameName: string) {
@@ -5032,16 +6995,40 @@ function createSessionId() {
 }
 
 function uniqueProcesses(processes: ProcessSnapshot[]) {
+  // Keep each running instance for scoped matching, overlay targeting, and
+  // recovery continuity. Older snapshots without PIDs can still use the path.
   return [
     ...new Map(
       processes.map((process) => [
-        process.emulatorId
-          ? `${process.exeName.toLowerCase()}#${process.pid ?? 0}`
-          : process.exeName.toLowerCase(),
+        process.pid !== undefined
+          ? `pid:${process.pid}`
+          : process.exePath
+            ? `path:${process.exePath}`
+            : `name:${process.exeName.toLowerCase()}`,
         process,
       ]),
     ).values(),
   ].sort((a, b) => a.exeName.localeCompare(b.exeName));
+}
+
+function* processLookupBatches(processes: ProcessSnapshot[]) {
+  // The API/cache still resolve executable names. Query each key once, then
+  // apply the result to every instance without discarding its path or PID.
+  const items = [
+    ...new Map(
+      processes.map((process) => [processCacheKey(process), process]),
+    ).values(),
+  ].map((process) => ({
+    key: processCacheKey(process),
+    identifiers: processIdentifiers(process),
+  }));
+  for (
+    let offset = 0;
+    offset < items.length;
+    offset += MATCH_PROCESSES_BATCH_SIZE
+  ) {
+    yield items.slice(offset, offset + MATCH_PROCESSES_BATCH_SIZE);
+  }
 }
 
 function processCacheKey(process: ProcessSnapshot) {
@@ -5136,29 +7123,6 @@ function linuxSteamAppId(path: string | null) {
 
 function normalizeProcessPath(path: string) {
   return path.replace(/\\/g, "/").toLowerCase();
-}
-
-async function fetchWithTimeout(
-  input: RequestInfo | URL,
-  init: RequestInit & { timeoutMs?: number } = {},
-) {
-  const { timeoutMs = API_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  if (signal) {
-    if (signal.aborted) controller.abort();
-    else
-      signal.addEventListener("abort", () => controller.abort(), {
-        once: true,
-      });
-  }
-
-  try {
-    return await fetch(input, { ...requestInit, signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-  }
 }
 
 function formatError(error: unknown) {

@@ -1,8 +1,24 @@
 {
-  "build": {
-    "beforeBuildCommand": "corepack pnpm build:test"
+  "app": {
+    "windows": [
+      {
+        "title": "PlayCounter (Test)",
+        "width": 1460,
+        "height": 760,
+        "minWidth": 920,
+        "minHeight": 620,
+        "visible": false,
+        "backgroundColor": "#0f1014",
+        "backgroundThrottling": "disabled"
+      }
+    ]
   },
   "bundle": {
-    "targets": ["dmg", "app"]
+    "targets": ["dmg", "app"],
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-"
+    }
   }
 }

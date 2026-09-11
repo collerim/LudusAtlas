@@ -2,7 +2,12 @@ import type { ViewId } from "../../store";
 
 export type TourAdvance =
   | { type: "anchor-present"; selector: string }
-  | { type: "event"; name: "mygames.demo-session-logged" };
+  | {
+      type: "event";
+      name: "mygames.demo-session-logged" | "mygames.demo-launch-attempted";
+    };
+
+export type TourEventName = Extract<TourAdvance, { type: "event" }>["name"];
 
 export type TourStep = {
   id: string;
@@ -109,6 +114,78 @@ export const TOURS: TourDefinition[] = [
     ],
   },
   {
+    id: "launch-games",
+    version: 1,
+    kind: "guide",
+    title: "Launch games directly",
+    description:
+      "Turn on direct launching, see how it works, and try the controller flow.",
+    duration: "2 min",
+    demoGame: true,
+    steps: [
+      {
+        id: "intro",
+        view: "settings",
+        anchor: a("settings-launcher"),
+        scrollIntoView: true,
+        title: "LudusAtlas can start games too",
+        body: "By default, LudusAtlas remembers recognized game program files locally. Direct launching is optional and off by default; turn it on to show Play buttons in My Games.",
+      },
+      {
+        id: "enable",
+        view: "settings",
+        anchor: a("settings-launcher"),
+        interactive: true,
+        manualAdvance: true,
+        persistentInteraction: true,
+        scrollIntoView: true,
+        allow: [a("settings-launcher")],
+        title: "Choose whether to enable it",
+        body: "The switch is real and saves right away. You can also leave it off and keep following this guide.",
+      },
+      {
+        id: "learned",
+        view: "games",
+        anchor: a("demo-launch-play"),
+        title: "LudusAtlas learns launch files locally",
+        body: "Start a game normally once and after that, you can use LudusAtlas to launch that game.",
+      },
+      {
+        id: "set-forget",
+        view: "games",
+        anchor: a("demo-menu-launch-file"),
+        retreatWhenMissing: a("demo-context-menu"),
+        backTo: "learned",
+        title: "Change or forget a launch file",
+        body: "Right-click a game to set a different .exe. If a saved file goes missing, LudusAtlas quietly removes the broken Play option until you set a new one.",
+      },
+      {
+        id: "limits",
+        view: "settings",
+        anchor: a("settings-launcher"),
+        scrollIntoView: true,
+        title: "Some games still need their usual launcher",
+        body: "LudusAtlas starts the .exe directly, so games that need Steam, Epic, or extra startup steps may only work from their normal launcher.",
+      },
+      {
+        id: "privacy",
+        view: "settings",
+        anchor: a("settings-launcher"),
+        scrollIntoView: true,
+        title: "Paths stay on this PC",
+        body: "Saved launch paths never leave your device and aren't included in backups. Turn Remember launch paths off to clear them and stop learning new ones without touching your games or history.",
+      },
+      {
+        id: "controller",
+        view: "settings",
+        anchor: a("settings-launcher"),
+        scrollIntoView: true,
+        title: "Optional controller navigation",
+        body: "Turn on Controller navigation to move around LudusAtlas with a controller. To bring LudusAtlas to the front, hold Select/View + R1/RB a few seconds and then release.",
+      },
+    ],
+  },
+  {
     id: "log-playtime",
     version: 1,
     kind: "guide",
@@ -186,7 +263,7 @@ export const TOURS: TourDefinition[] = [
   },
   {
     id: "game-actions",
-    version: 1,
+    version: 2,
     kind: "guide",
     title: "Manage a game in your library",
     description: "Everything in a game's right-click menu.",
@@ -251,16 +328,6 @@ export const TOURS: TourDefinition[] = [
         backTo: "open-menu",
         title: "Fix a wrong match",
         body: "Report Wrong Match asks what the app really is - a different game, or no game at all - and sends that in for review. Convert to Custom Game keeps it here under a name you pick yourself.",
-      },
-      {
-        id: "copy",
-        view: "games",
-        anchor: a("demo-menu-copy-name"),
-        additionalAnchors: [a("demo-menu-copy-exe")],
-        retreatWhenMissing: a("demo-context-menu"),
-        backTo: "open-menu",
-        title: "Copy a name",
-        body: "Copy Game Name and Copy File Name put the name on your clipboard - useful when you report a problem to us.",
       },
       {
         id: "remove",
@@ -437,14 +504,6 @@ export const TOURS: TourDefinition[] = [
         allow: [a("settings-sharing")],
         title: "Help improve detection",
         body: "When you ignore an app LudusAtlas doesn't recognize, it can send the file name, your platform, and an anonymous install ID to improve the PlayCounter Community service. Playtime and game history are never shared.",
-      },
-      {
-        id: "maintenance",
-        view: "settings",
-        anchor: a("settings-maintenance"),
-        scrollIntoView: true,
-        title: "Recovery tools",
-        body: "Reset local cache is for stale matches or tracking errors. It clears cached detection data, not your play history. This action stays locked during the guide to prevent an accidental reset.",
       },
       {
         id: "updates",

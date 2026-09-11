@@ -1,9 +1,14 @@
 import {
+  AlertTriangle,
+  ArrowLeft,
   BarChart3,
   Bug,
+  Check,
   Cpu,
+  Download,
   Gamepad2,
   Globe,
+  Info,
   ListChecks,
   LoaderCircle,
   MessageSquarePlus,
@@ -20,18 +25,28 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
+  Component,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
+  type ErrorInfo,
   type ReactNode,
+  lazy,
+  Suspense,
 } from "react";
 import { initializeTracker } from "../tracker";
+import {
+  CONTROLLER_MODE_EVENT,
+  deactivateControllerMode,
+} from "../controllerBridge";
 import { emulatorAssetUrls } from "../emulators/assets";
+import { BackToTopButton } from "./BackToTopButton";
 import { FeedbackDialog } from "./FeedbackDialog";
 import { NotificationBell } from "./NotificationBell";
 import { ReleaseNotesDialog } from "./ReleaseNotesDialog";
 import { SidebarButton } from "./SidebarButton";
+import { XboxButtonGlyph, type XboxControl } from "./XboxButtonGlyph";
 import { Button, IconButton } from "./primitives";
 import { useNeedsReviewCount } from "./views/DiscoveredView";
 import { DevToolsView } from "./views/DevToolsView";
@@ -59,6 +74,41 @@ import {
   findUnseenReleaseNotes,
   toDisplayNotes,
 } from "../releaseNotes";
+
+const ImportLibraryView = lazy(() => import("./views/ImportLibraryView"));
+
+class ImporterErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Library importer failed to render", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="rounded-lg border border-danger-border bg-danger-tint px-4 py-3 text-sm text-danger">
+          The library importer could not be opened: {this.state.error.message}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function backToMyGames() {
+  const { libraryImportProvider, setActiveView, setLibraryTab } =
+    useAppStore.getState();
+  setLibraryTab(libraryImportProvider);
+  setActiveView("games");
+}
 
 const views: Record<
   ViewId,
@@ -102,6 +152,34 @@ const views: Record<
     icon: Gamepad2,
     component: <MyGamesView />,
   },
+  import: {
+    label: "Import library",
+    subtitle: "Bring an existing game library into LudusAtlas",
+    icon: Download,
+    component: (
+      <div className="grid gap-4">
+        <div>
+          <Button
+            variant="secondary"
+            icon={ArrowLeft}
+            data-controller-item="view-link"
+            onClick={backToMyGames}
+          >
+            Back to My Games
+          </Button>
+        </div>
+        <ImporterErrorBoundary>
+          <Suspense
+            fallback={
+              <div className="text-sm text-text-muted">Loading importer…</div>
+            }
+          >
+            <ImportLibraryView />
+          </Suspense>
+        </ImporterErrorBoundary>
+      </div>
+    ),
+  },
   discovered: {
     label: "Discovered",
     subtitle: "Apps found on your system, ready to match",
@@ -135,7 +213,10 @@ const views: Record<
 };
 
 const sidebarSections: Array<{ label: string; items: ViewId[] }> = [
-  { label: "Library", items: ["now", "games", "history", "achievements"] },
+  {
+    label: "Library",
+    items: ["now", "games", "history", "achievements"],
+  },
   { label: "Emulators", items: ["emulating", "dosbox", "dolphin"] },
   { label: "System", items: ["discovered", "settings", "dev"] },
 ];
@@ -148,10 +229,41 @@ let startupPreferenceSynced = false;
 
 export function App() {
   const contentRef = useRef<HTMLDivElement>(null);
+  const controllerModeRef = useRef(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [controllerModeActive, setControllerModeActive] = useState(false);
   const [devToolsEnabled, setDevToolsEnabled] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const activeView = useAppStore((state) => state.activeView);
+  const [importerMounted, setImporterMounted] = useState(
+    activeView === "import",
+  );
+  const renderImporter = importerMounted || activeView === "import";
+  useEffect(() => {
+    if (activeView === "import") setImporterMounted(true);
+  }, [activeView]);
+  /* My Games is expensive to build - it sorts the whole library and drip-feeds
+     the cards back in batches - and unmounting it throws every cover <img>
+     away, so a revisit reloads the lot. Once opened it stays mounted and is
+     merely hidden, exactly like the importer above. */
+  const [gamesMounted, setGamesMounted] = useState(activeView === "games");
+  const renderGames = gamesMounted || activeView === "games";
+  useEffect(() => {
+    if (activeView === "games") setGamesMounted(true);
+  }, [activeView]);
+  const libraryImportProvider = useAppStore(
+    (state) => state.libraryImportProvider,
+  );
+  const activeViewLabel =
+    activeView === "import"
+      ? `Import from ${libraryImportProvider === "xbox" ? "Xbox" : "Steam"}`
+      : views[activeView].label;
+  const activeViewSubtitle =
+    activeView === "import"
+      ? libraryImportProvider === "xbox"
+        ? "Bring your Xbox games and playtime into LudusAtlas"
+        : "Bring your Steam library and playtime into LudusAtlas"
+      : views[activeView].subtitle;
   const activeTourId = useAppStore((state) => state.activeTour?.tourId ?? null);
   const tourProgress = useAppStore((state) => state.tourProgress);
   const lastSeenReleaseNotesVersion = useAppStore(
@@ -237,6 +349,37 @@ export function App() {
     content.scrollTop = 0;
     content.scrollLeft = 0;
   }, [activeTourId, activeView]);
+
+  useEffect(() => {
+    const handleControllerMode = (event: Event) => {
+      const detail = (event as CustomEvent<{ active?: boolean }>).detail;
+      const active = detail?.active === true;
+      controllerModeRef.current = active;
+      setControllerModeActive(active);
+      if (active) {
+        document.documentElement.setAttribute("data-controller-mode", "true");
+      } else {
+        document.documentElement.removeAttribute("data-controller-mode");
+      }
+    };
+    const leaveControllerMode = (event: Event) => {
+      if (event.type === "keydown" && !event.isTrusted) return;
+      if (!controllerModeRef.current) return;
+      deactivateControllerMode();
+    };
+
+    window.addEventListener(CONTROLLER_MODE_EVENT, handleControllerMode);
+    window.addEventListener("pointermove", leaveControllerMode, true);
+    window.addEventListener("pointerdown", leaveControllerMode, true);
+    window.addEventListener("keydown", leaveControllerMode, true);
+    return () => {
+      window.removeEventListener(CONTROLLER_MODE_EVENT, handleControllerMode);
+      window.removeEventListener("pointermove", leaveControllerMode, true);
+      window.removeEventListener("pointerdown", leaveControllerMode, true);
+      window.removeEventListener("keydown", leaveControllerMode, true);
+      document.documentElement.removeAttribute("data-controller-mode");
+    };
+  }, []);
 
   useEffect(() => {
     void initializeTracker();
@@ -331,7 +474,7 @@ export function App() {
             </div>
           </div>
         </div>
-        <nav className="flex-1 overflow-auto px-4 pb-4">
+        <nav data-controller-scroll className="flex-1 overflow-auto px-4 pb-4">
           {sidebarSections.map((section) => {
             if (
               section.label === "Emulators" &&
@@ -380,7 +523,13 @@ export function App() {
                         icon={view.icon}
                         imageSrc={view.imageSrc}
                         label={view.label}
-                        active={activeView === item}
+                        active={
+                          activeView === item ||
+                          (item === "games" && activeView === "import")
+                        }
+                        controllerEnabled={
+                          item !== "discovered" && item !== "dev"
+                        }
                         dataTour={`nav-${item}`}
                         badge={
                           item === "discovered"
@@ -425,18 +574,19 @@ export function App() {
           />
         </div>
       </aside>
-      <section className="flex min-w-0 flex-1 flex-col">
+      <section
+        data-controller-mode={controllerModeActive ? "true" : undefined}
+        className="flex min-w-0 flex-1 flex-col"
+      >
         <header
           data-tour="header"
           className="flex h-16 items-center justify-between border-b border-border bg-surface px-7"
         >
           <div>
             <h1 className="text-xl font-semibold tracking-normal text-text">
-              {views[activeView].label}
+              {activeViewLabel}
             </h1>
-            <p className="text-sm text-text-muted">
-              {views[activeView].subtitle}
-            </p>
+            <p className="text-sm text-text-muted">{activeViewSubtitle}</p>
           </div>
           <div className="flex items-center gap-2">
             <HelpButton />
@@ -498,13 +648,40 @@ export function App() {
           <div
             ref={contentRef}
             data-tour="content"
-            className="absolute inset-0 overflow-auto px-7 py-6"
+            data-controller-scroll
+            data-controller-content="true"
+            tabIndex={-1}
+            aria-label={`${activeViewLabel} content`}
+            className="controller-content absolute inset-0 overflow-auto px-7 py-6"
           >
-            {views[activeView].component}
+            {activeView !== "import" && activeView !== "games"
+              ? views[activeView].component
+              : null}
+            {renderGames ? (
+              <div hidden={activeView !== "games"}>{views.games.component}</div>
+            ) : null}
+            {renderImporter ? (
+              <div hidden={activeView !== "import"}>
+                {views.import.component}
+              </div>
+            ) : null}
           </div>
+          {controllerModeActive ? (
+            <div
+              aria-hidden="true"
+              className="controller-scroll-focus-indicator pointer-events-none absolute right-5 top-5 z-40 flex items-center gap-2 rounded-full border border-accent/60 bg-bg/95 px-3 py-2 text-xs font-semibold text-accent shadow-raised backdrop-blur"
+            >
+              <XboxButtonGlyph button="RIGHT_STICK" size="small" />
+              <span>Scrolling this view</span>
+            </div>
+          ) : null}
           {/* Scroll Fade Overlay */}
           <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-bg to-transparent" />
+          {activeView === "games" ? (
+            <BackToTopButton containerRef={contentRef} />
+          ) : null}
         </div>
+        {controllerModeActive ? <ControllerModeFooter /> : null}
       </section>
       {feedbackOpen ? (
         <FeedbackDialog onClose={() => setFeedbackOpen(false)} />
@@ -535,6 +712,67 @@ export function App() {
       <WelcomePrompt />
       <TourOverlay />
     </main>
+  );
+}
+
+function ControllerModeFooter() {
+  return (
+    <div
+      aria-label="Controller mode controls"
+      className="flex h-[49px] shrink-0 items-center justify-between gap-6 overflow-hidden border-t border-border/50 bg-surface/30 px-7 text-xs font-medium text-text-muted backdrop-blur-xl"
+    >
+      <div className="flex shrink-0 items-center gap-2 font-semibold text-accent">
+        <span className="grid h-7 w-7 place-items-center rounded-full border border-accent/40 bg-accent/10 shadow-[0_0_12px_rgb(var(--color-accent)/0.22)]">
+          <Gamepad2 size={15} strokeWidth={2.4} />
+        </span>
+        <span>Controller mode</span>
+      </div>
+      <div className="flex min-w-0 items-center justify-end gap-5 whitespace-nowrap">
+        <ControllerHint button="DPAD" label="Navigate" />
+        <ControllerHint button="A" label="Select" />
+        <ControllerHint button="B" label="Back" />
+        <ControllerHint button="RIGHT_STICK" label="Scroll" />
+        <ControllerHint button="VIEW" label="Card size" />
+        <div
+          className="flex min-w-0 items-center gap-1.5"
+          aria-label="Hold View plus right bumper for two seconds to bring LudusAtlas forward"
+        >
+          <XboxButtonGlyph button="VIEW" />
+          <span className="text-text-faint">+</span>
+          <XboxButtonGlyph button="RB" />
+          <span className="truncate text-text-faint">
+            Hold 2 sec · Bring LudusAtlas forward
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const controllerNames: Record<XboxControl, string> = {
+  A: "A",
+  B: "B",
+  DPAD: "D-pad",
+  RIGHT_STICK: "Right stick",
+  VIEW: "View",
+  RB: "Right bumper",
+};
+
+function ControllerHint({
+  button,
+  label,
+}: {
+  button: XboxControl;
+  label: string;
+}) {
+  return (
+    <span
+      className="flex items-center gap-2"
+      aria-label={`${controllerNames[button]}: ${label}`}
+    >
+      <XboxButtonGlyph button={button} />
+      <span>{label}</span>
+    </span>
   );
 }
 
@@ -595,7 +833,10 @@ function ToastViewport() {
   const dismissToast = useAppStore((state) => state.dismissToast);
 
   return (
-    <div className="pointer-events-none fixed bottom-5 right-5 z-50 grid w-80 gap-2">
+    <div
+      aria-label="Notifications"
+      className="pointer-events-none fixed bottom-5 right-5 z-50 grid w-[min(22rem,calc(100vw-2.5rem))] gap-3"
+    >
       {toasts.map((toast) => (
         <ToastCard
           key={toast.id}
@@ -627,30 +868,47 @@ function ToastCard({
     return () => window.clearTimeout(removeTimer);
   }, [leaving, onDismiss]);
 
-  const toneClass =
+  const presentation =
     toast.tone === "success"
-      ? "border-success-border"
+      ? {
+          icon: Check,
+          label: "Success",
+          toneClass: "app-toast-success",
+        }
       : toast.tone === "error"
-        ? "border-danger-border"
-        : "border-info-border";
+        ? {
+            icon: AlertTriangle,
+            label: "Something went wrong",
+            toneClass: "app-toast-error",
+          }
+        : {
+            icon: Info,
+            label: "Heads up",
+            toneClass: "app-toast-info",
+          };
+  const ToneIcon = presentation.icon;
 
   return (
-    <div
-      className={`pointer-events-auto rounded-lg border bg-surface p-3 shadow-raised ${leaving ? "animate-toast-out" : "animate-toast-in"} ${toneClass}`}
+    <article
+      aria-atomic="true"
+      aria-live={toast.tone === "error" ? "assertive" : "polite"}
+      className={`app-toast pointer-events-auto ${presentation.toneClass} ${leaving ? "animate-toast-out" : "animate-toast-in"}`}
     >
-      <div className="flex items-start gap-3">
-        {toast.emoji ? (
-          <span
-            aria-hidden="true"
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-surface-hover text-xl leading-none"
-          >
-            {toast.emoji}
-          </span>
-        ) : null}
+      <div className="flex items-start gap-3.5 p-3.5">
+        <span aria-hidden="true" className="app-toast-symbol">
+          {toast.emoji ? (
+            <span className="text-xl leading-none">{toast.emoji}</span>
+          ) : (
+            <ToneIcon size={18} strokeWidth={2.4} />
+          )}
+        </span>
         <div className="min-w-0 flex-1">
-          <div className="break-words font-medium text-text">{toast.title}</div>
+          <div className="app-toast-kicker">{presentation.label}</div>
+          <div className="mt-0.5 break-words text-sm font-semibold leading-5 text-text">
+            {toast.title}
+          </div>
           {toast.detail ? (
-            <div className="mt-1 break-words text-sm text-text-muted">
+            <div className="mt-1 break-words text-xs leading-[1.45] text-text-muted">
               {toast.detail}
             </div>
           ) : null}
@@ -659,12 +917,13 @@ function ToastCard({
           type="button"
           aria-label="Dismiss notification"
           onClick={() => setLeaving(true)}
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-text-muted transition hover:bg-surface-hover hover:text-text"
+          className="app-toast-dismiss grid h-7 w-7 shrink-0 place-items-center rounded-lg text-text-muted transition hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
           <X size={14} />
         </button>
       </div>
-    </div>
+      <div aria-hidden="true" className="app-toast-progress" />
+    </article>
   );
 }
 

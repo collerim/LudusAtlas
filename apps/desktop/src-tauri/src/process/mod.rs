@@ -11,7 +11,9 @@ pub struct ProcessSnapshot {
     pub started_at_unix: u64,
     pub emulator_id: Option<&'static str>,
     pub command_line: Option<Vec<String>>,
+    pub working_directory: Option<String>,
     pub window_title: Option<String>,
+    pub open_files: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -19,7 +21,7 @@ pub trait ProcessScanner: Send + Sync {
     async fn scan(&self) -> Result<Vec<ProcessSnapshot>, Box<dyn Error + Send + Sync>>;
 }
 
-mod emulator;
+pub(crate) mod emulator;
 
 #[cfg(target_os = "windows")]
 mod windows;

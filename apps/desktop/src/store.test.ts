@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  canCancelCommunitySuggestion,
   canSuggestCustomGameToCommunity,
   canSwitchApprovedSuggestionToCommunity,
   canonicalGameKey,
   createGameIdentityResolver,
+  findPendingCommunitySuggestionEntry,
   resolvedCanonicalGameKey,
   useAppStore,
 } from "./store";
 import { MAX_STORED_SESSIONS } from "./sessionPersistence";
+import { manualLaunchTargetKey } from "./gameLaunch";
 import {
   DISCOVERED_REVIEW_REMINDER_ID,
   evaluateDiscoveredReviewReminder,
@@ -36,6 +39,100 @@ describe("custom game community suggestion eligibility", () => {
         }),
       ).toBe(false);
     }
+  });
+
+  it("only allows cancellation while a custom game suggestion is pending", () => {
+    expect(
+      canCancelCommunitySuggestion({
+        source: "custom",
+        exeName: "Palworld.exe",
+        communitySuggestionId: 84,
+        communitySuggestionStatus: "pending",
+      }),
+    ).toBe(true);
+    expect(
+      canCancelCommunitySuggestion({
+        source: "custom",
+        exeName: "Legacy.exe",
+        communitySuggestionId: 85,
+        communitySuggestionVerified: false,
+      }),
+    ).toBe(true);
+
+    for (const status of ["verified", "rejected"] as const) {
+      expect(
+        canCancelCommunitySuggestion({
+          source: "custom",
+          exeName: "Palworld.exe",
+          communitySuggestionId: 84,
+          communitySuggestionStatus: status,
+        }),
+      ).toBe(false);
+    }
+    expect(
+      canCancelCommunitySuggestion({
+        source: "custom",
+        exeName: "Palworld.exe",
+      }),
+    ).toBe(false);
+    expect(
+      canCancelCommunitySuggestion({
+        source: "community",
+        exeName: "Palworld.exe",
+        communitySuggestionId: 84,
+        communitySuggestionStatus: "pending",
+      }),
+    ).toBe(false);
+  });
+
+  it("finds the exact pending executable on a grouped library card", () => {
+    const exeCache = new Map([
+      [
+        "primary.exe",
+        {
+          exeName: "Primary.exe",
+          state: "matched" as const,
+          source: "custom" as const,
+          lastCheckedAt: "2026-08-23T00:00:00.000Z",
+        },
+      ],
+      [
+        "pending.exe",
+        {
+          exeName: "Pending.exe",
+          state: "matched" as const,
+          source: "custom" as const,
+          communitySuggestionId: 42,
+          communitySuggestionStatus: "pending" as const,
+          lastCheckedAt: "2026-08-23T00:00:00.000Z",
+        },
+      ],
+      [
+        "later.exe",
+        {
+          exeName: "Later.exe",
+          state: "matched" as const,
+          source: "custom" as const,
+          communitySuggestionId: 84,
+          communitySuggestionStatus: "pending" as const,
+          lastCheckedAt: "2026-08-23T00:00:00.000Z",
+        },
+      ],
+    ]);
+
+    expect(
+      findPendingCommunitySuggestionEntry(
+        ["Primary.exe", "Pending.exe", "Later.exe"],
+        exeCache,
+      ),
+    ).toEqual({
+      ref: { kind: "exe", key: "pending.exe" },
+      exeName: "Pending.exe",
+      gameId: 42,
+    });
+    expect(
+      findPendingCommunitySuggestionEntry(["Primary.exe"], exeCache),
+    ).toBeNull();
   });
 });
 
@@ -97,6 +194,13 @@ beforeEach(() => {
     autoDetectedGameKeys: [],
     ignoredProcesses: new Set(),
     userIgnoredProcesses: new Set(),
+    launchTargets: new Map(),
+    manualLaunchTargets: new Map(),
+    emulatorAutoBinaries: new Map(),
+    emulatorManualBinaries: new Map(),
+    emulatorAutoLaunchTargets: new Map(),
+    emulatorManualLaunchTargets: new Map(),
+    emulatorLaunchCandidates: new Map(),
     settings: {
       ...useAppStore.getState().settings,
       desktopOverlaysEnabled: true,
@@ -104,19 +208,286 @@ beforeEach(() => {
       overlaySessionStarts: true,
       overlaySessionSummaries: true,
       overlayMilestones: true,
+      overlayActionRequired: true,
       overlayDiscoveries: false,
+      rememberLaunchPaths: true,
+      gameLaunchingEnabled: false,
+      controllerNavigationEnabled: false,
     },
   });
 });
 
+describe("launch target state", () => {
+  it("defaults launcher control to off", () => {
+    expect(useAppStore.getState().settings).toMatchObject({
+      rememberLaunchPaths: true,
+      gameLaunchingEnabled: false,
+      controllerNavigationEnabled: false,
+    });
+  });
+
+  it("forgets every launch path and blocks new ones when storage is disabled", () => {
+    const owner = { gameId: 42, source: "igdb" as const };
+    const executable = {
+      exeName: "Game.exe",
+      path: String.raw`C:\Games\Game.exe`,
+      owner,
+    };
+    const emulatorBinary = {
+      emulatorId: "dolphin",
+      exePath: String.raw`C:\Emulators\Dolphin.exe`,
+      setAt: "auto",
+    };
+    const emulatorTarget = {
+      contentKey: "dolphin:rom:game.rvz",
+      emulatorId: "dolphin",
+      filePath: String.raw`D:\Games\Game.rvz`,
+      setAt: "auto",
+    };
+    useAppStore.getState().setLaunchTarget(executable);
+    useAppStore.getState().setManualLaunchTarget(executable);
+    useAppStore.getState().setEmulatorAutoBinary(emulatorBinary);
+    useAppStore.getState().setEmulatorManualBinary(emulatorBinary);
+    useAppStore.getState().setEmulatorAutoLaunchTarget(emulatorTarget);
+    useAppStore.getState().setEmulatorManualLaunchTarget(emulatorTarget);
+    useAppStore
+      .getState()
+      .setEmulatorLaunchCandidates([
+        { ...emulatorTarget, displayName: "Game.rvz" },
+      ]);
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", true);
+    useAppStore
+      .getState()
+      .setLauncherSetting("controllerNavigationEnabled", true);
+
+    useAppStore.getState().setLauncherSetting("rememberLaunchPaths", false);
+
+    expect(useAppStore.getState().settings).toMatchObject({
+      rememberLaunchPaths: false,
+      gameLaunchingEnabled: false,
+      controllerNavigationEnabled: false,
+    });
+    expect(useAppStore.getState().launchTargets.size).toBe(0);
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorAutoBinaries.size).toBe(0);
+    expect(useAppStore.getState().emulatorManualBinaries.size).toBe(0);
+    expect(useAppStore.getState().emulatorAutoLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorManualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorLaunchCandidates.size).toBe(0);
+
+    useAppStore.getState().setLaunchTarget(executable);
+    useAppStore.getState().setManualLaunchTarget(executable);
+    useAppStore.getState().setEmulatorAutoBinary(emulatorBinary);
+    useAppStore.getState().setEmulatorManualBinary(emulatorBinary);
+    useAppStore.getState().setEmulatorAutoLaunchTarget(emulatorTarget);
+    useAppStore.getState().setEmulatorManualLaunchTarget(emulatorTarget);
+    useAppStore
+      .getState()
+      .setEmulatorLaunchCandidates([
+        { ...emulatorTarget, displayName: "Game.rvz" },
+      ]);
+    expect(useAppStore.getState().launchTargets.size).toBe(0);
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorAutoBinaries.size).toBe(0);
+    expect(useAppStore.getState().emulatorManualBinaries.size).toBe(0);
+    expect(useAppStore.getState().emulatorAutoLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorManualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorLaunchCandidates.size).toBe(0);
+  });
+
+  it("keys targets case-insensitively", () => {
+    useAppStore.getState().setLaunchTarget({
+      exeName: "Game.exe",
+      path: String.raw`C:\Games\Game.exe`,
+      owner: { gameId: 42, source: "igdb" },
+    });
+    expect(useAppStore.getState().launchTargets.has("game.exe")).toBe(true);
+
+    useAppStore.getState().removeLaunchTarget("GAME.EXE");
+    expect(useAppStore.getState().launchTargets.size).toBe(0);
+  });
+
+  it("stores manual targets by owner and replaces every alias atomically", () => {
+    const oldOwner = { gameId: -1, source: "custom" as const };
+    const currentOwner = { gameId: 42, source: "community" as const };
+    const aliases = [oldOwner, currentOwner];
+    useAppStore.getState().setManualLaunchTarget({
+      exeName: "OldLauncher.exe",
+      path: String.raw`C:\Games\OldLauncher.exe`,
+      owner: oldOwner,
+    });
+
+    useAppStore.getState().setManualLaunchTarget(
+      {
+        exeName: "Launcher.exe",
+        path: String.raw`D:\Games\Launcher.exe`,
+        owner: currentOwner,
+      },
+      aliases,
+    );
+
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(1);
+    expect(
+      useAppStore
+        .getState()
+        .manualLaunchTargets.has(manualLaunchTargetKey(oldOwner)),
+    ).toBe(false);
+    expect(
+      useAppStore
+        .getState()
+        .manualLaunchTargets.get(manualLaunchTargetKey(currentOwner)),
+    ).toMatchObject({ exeName: "Launcher.exe" });
+  });
+
+  it("allows different games to use the same launcher basename", () => {
+    const firstOwner = { gameId: 1, source: "igdb" as const };
+    const secondOwner = { gameId: 2, source: "igdb" as const };
+    for (const [owner, path] of [
+      [firstOwner, String.raw`C:\First\Launcher.exe`],
+      [secondOwner, String.raw`D:\Second\Launcher.exe`],
+    ] as const) {
+      useAppStore.getState().setManualLaunchTarget({
+        exeName: "Launcher.exe",
+        path,
+        owner,
+      });
+    }
+
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(2);
+  });
+
+  it("forgets regular executable paths without clearing emulator paths", () => {
+    const owner = { gameId: 42, source: "igdb" as const };
+    useAppStore.getState().setManualLaunchTarget({
+      exeName: "Launcher.exe",
+      path: String.raw`C:\Games\Launcher.exe`,
+      owner,
+    });
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(1);
+
+    useAppStore.getState().setLaunchTarget({
+      exeName: "Game.exe",
+      path: String.raw`C:\Games\Game.exe`,
+      owner,
+    });
+    useAppStore.getState().setEmulatorAutoBinary({
+      emulatorId: "dolphin",
+      exePath: String.raw`C:\Emulators\Dolphin.exe`,
+      setAt: "auto",
+    });
+
+    useAppStore.getState().forgetExecutableLaunchTargets();
+
+    expect(useAppStore.getState().launchTargets.size).toBe(0);
+    expect(useAppStore.getState().manualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorAutoBinaries.size).toBe(1);
+  });
+
+  it("keeps learned emulator paths sticky and lets manual choices win", () => {
+    const automatic = {
+      emulatorId: "dolphin",
+      exePath: String.raw`C:\Auto\Dolphin.exe`,
+      setAt: "auto",
+    };
+    useAppStore.getState().setEmulatorAutoBinary(automatic);
+    useAppStore.getState().setEmulatorAutoBinary({
+      ...automatic,
+      exePath: String.raw`C:\Other\Dolphin.exe`,
+    });
+    expect(useAppStore.getState().emulatorAutoBinaries.get("dolphin")).toBe(
+      automatic,
+    );
+
+    useAppStore.getState().setEmulatorManualBinary({
+      ...automatic,
+      exePath: String.raw`D:\Manual\Dolphin.exe`,
+      setAt: "manual",
+    });
+    expect(useAppStore.getState().emulatorAutoBinaries.size).toBe(1);
+    expect(useAppStore.getState().emulatorManualBinaries.size).toBe(1);
+
+    const owner = { gameId: 42, source: "igdb" as const };
+    useAppStore.getState().setLaunchTarget({
+      exeName: "Game.exe",
+      path: String.raw`C:\Games\Game.exe`,
+      owner,
+    });
+    useAppStore.getState().setEmulatorAutoLaunchTarget({
+      contentKey: "dolphin:rom:game.rvz",
+      emulatorId: "dolphin",
+      filePath: String.raw`D:\Games\Game.rvz`,
+      setAt: "auto",
+    });
+    useAppStore.getState().setEmulatorManualLaunchTarget({
+      contentKey: "dolphin:title_id:game",
+      emulatorId: "dolphin",
+      filePath: String.raw`D:\Games\Other Game.rvz`,
+      setAt: "manual",
+    });
+    useAppStore.getState().setEmulatorLaunchCandidates([
+      {
+        contentKey: "dolphin:rom:candidate.rvz",
+        emulatorId: "dolphin",
+        filePath: String.raw`D:\Games\Candidate.rvz`,
+        displayName: "Candidate.rvz",
+        setAt: "candidate",
+      },
+    ]);
+
+    useAppStore.getState().forgetEmulatorLaunchTargets();
+
+    expect(useAppStore.getState().emulatorAutoBinaries.size).toBe(0);
+    expect(useAppStore.getState().emulatorManualBinaries.size).toBe(0);
+    expect(useAppStore.getState().emulatorAutoLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorManualLaunchTargets.size).toBe(0);
+    expect(useAppStore.getState().emulatorLaunchCandidates.size).toBe(0);
+    expect(useAppStore.getState().launchTargets.size).toBe(1);
+  });
+
+  it("keeps launching opt-in and turns controller control off with it", () => {
+    useAppStore
+      .getState()
+      .setLauncherSetting("controllerNavigationEnabled", true);
+    expect(useAppStore.getState().settings.controllerNavigationEnabled).toBe(
+      false,
+    );
+
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", true);
+    useAppStore
+      .getState()
+      .setLauncherSetting("controllerNavigationEnabled", true);
+    expect(useAppStore.getState().settings).toMatchObject({
+      gameLaunchingEnabled: true,
+      controllerNavigationEnabled: true,
+    });
+
+    useAppStore.getState().setLauncherSetting("gameLaunchingEnabled", false);
+    expect(useAppStore.getState().settings).toMatchObject({
+      gameLaunchingEnabled: false,
+      controllerNavigationEnabled: false,
+    });
+  });
+});
+
 describe("desktop overlay settings", () => {
+  it("persists the chosen monitor with the notification settings", async () => {
+    useAppStore.getState().setOverlayMonitor("display-two");
+    await Promise.resolve();
+    const saved = vi.mocked(globalThis.localStorage.setItem).mock.calls.at(-1);
+    expect(JSON.parse(saved![1]).settings.overlayMonitor).toBe("display-two");
+    useAppStore.getState().setOverlayMonitor("primary");
+    await Promise.resolve();
+  });
+
   it("defaults notifications on except for new discoveries", () => {
     expect(useAppStore.getState().settings).toMatchObject({
       desktopOverlaysEnabled: true,
+      overlayMonitor: "primary",
       overlayFirstDetections: true,
       overlaySessionStarts: true,
       overlaySessionSummaries: true,
       overlayMilestones: true,
+      overlayActionRequired: true,
       overlayDiscoveries: false,
     });
   });
@@ -207,6 +578,55 @@ describe("ignored process sharing preference", () => {
     } finally {
       useAppStore.setState({ settings: originalSettings });
     }
+  });
+});
+
+describe("My Games presentation settings", () => {
+  it("persists card size, sort, and badge visibility independently", async () => {
+    const originalSettings = useAppStore.getState().settings;
+    try {
+      useAppStore.getState().setMyGamesCardSize("list");
+      useAppStore.getState().setMyGamesSortKey("name");
+      useAppStore.getState().setMyGamesShowOriginBadges(false);
+      useAppStore.getState().setMyGamesShowMatchBadges(true);
+
+      expect(useAppStore.getState().settings).toMatchObject({
+        libraryCardSize: "list",
+        librarySortKey: "name",
+        libraryShowOriginBadges: false,
+        libraryShowMatchBadges: true,
+      });
+      await Promise.resolve();
+      expect(globalThis.localStorage.setItem).toHaveBeenCalled();
+    } finally {
+      useAppStore.setState({ settings: originalSettings });
+    }
+  });
+
+  it("persists the summary row toggle and the chosen cards", async () => {
+    const originalSettings = useAppStore.getState().settings;
+    try {
+      useAppStore.getState().setMyGamesShowStatCards(false);
+      useAppStore.getState().setMyGamesStatCards(["games", "installed"]);
+
+      expect(useAppStore.getState().settings).toMatchObject({
+        libraryShowStatCards: false,
+        libraryStatCards: ["games", "installed"],
+      });
+      await Promise.resolve();
+      expect(globalThis.localStorage.setItem).toHaveBeenCalled();
+    } finally {
+      useAppStore.setState({ settings: originalSettings });
+    }
+  });
+
+  it("keeps the importer provider in session state", () => {
+    const originalProvider = useAppStore.getState().libraryImportProvider;
+    const originalSettings = useAppStore.getState().settings;
+    useAppStore.getState().setLibraryImportProvider("steam");
+    expect(useAppStore.getState().libraryImportProvider).toBe("steam");
+    expect(useAppStore.getState().settings).toBe(originalSettings);
+    useAppStore.setState({ libraryImportProvider: originalProvider });
   });
 });
 

@@ -50,6 +50,114 @@ export interface EmulatorResolveResponse {
   }>;
 }
 
+/** A locally installed or remotely linked game-library provider. */
+export type LibraryProviderId = "steam" | "xbox";
+
+export interface LibraryResolveRequest {
+  items: Array<{
+    /** Client-generated correlation key; never treated as game identity. */
+    key: string;
+    provider: LibraryProviderId;
+    /** Provider-native id. Steam uses its decimal AppID. */
+    externalId: string;
+  }>;
+}
+
+export interface LibraryKnownExecutable {
+  platform: Platform;
+  kind: ProcessIdentifierKind;
+  value: string;
+  provenance: "igdb" | "community";
+  verified: boolean;
+  /** True when this basename must not become a global one-to-one mapping. */
+  ambiguous?: boolean;
+}
+
+export interface LibraryResolveResponse {
+  results: Array<{
+    key: string;
+    status: "resolved" | "unknown";
+    game?: Game;
+    executables?: LibraryKnownExecutable[];
+    flaggedIdentifiers?: Array<{
+      value: string;
+      reason: IdentifierFlagReason;
+    }>;
+  }>;
+}
+export interface LibraryReverseResolveRequest {
+  /** Server-local game id selected by the user. */
+  gameId: number;
+}
+
+export interface LibraryReverseResolveResponse {
+  game: Game;
+  executables: LibraryKnownExecutable[];
+}
+
+/**
+ * Xbox playtime import: the local desktop client has no on-disk source for
+ * Xbox/Game Pass playtime, so the whole OAuth + Xbox Live lookup + IGDB
+ * matching flow runs server-side. The desktop client never receives a
+ * Microsoft or Xbox Live token.
+ */
+export interface XboxImportStartResponse {
+  /** Opaque handle correlating the browser sign-in with later polling. */
+  attemptId: string;
+  /** Microsoft sign-in URL to open in the user's system browser. */
+  authorizeUrl: string;
+}
+
+export type XboxImportFailureReason =
+  | "cancelled"
+  | "timed_out"
+  | "oauth_error"
+  | "xbox_api_error";
+
+export type XboxImportFailureStage =
+  | "authorization"
+  | "microsoft_token"
+  | "xbox_user_token"
+  | "xbox_xsts"
+  | "title_history";
+
+export interface XboxImportGame {
+  /** Xbox Live title ID, the provider-native external ID for this provider. */
+  externalId: string;
+  /** Title as reported by Xbox Live; never IGDB truth. */
+  name: string;
+  /**
+   * Total playtime in seconds when Xbox Live reported MinutesPlayed,
+   * otherwise null. null is a distinct "unknown", never zero.
+   */
+  providerSeconds: number | null;
+  /** ISO timestamp of the last achievement unlock, when available. */
+  providerLastPlayedAt?: string;
+  /**
+   * Title-search suggestions only. The desktop must require the user to pick
+   * one before importing; no Xbox-provided identifier proves an IGDB match.
+   */
+  candidates: Game[];
+}
+
+export type XboxImportProgressStage = "authorization" | "history";
+
+export type XboxImportResultResponse =
+  | { status: "pending"; stage?: XboxImportProgressStage }
+  | { status: "done"; games: XboxImportGame[] }
+  | {
+      status: "failed";
+      reason: XboxImportFailureReason;
+      stage?: XboxImportFailureStage;
+      errorCode?: string;
+      /** Display-only Microsoft account label; never use for authorization. */
+      accountLabel?: string;
+    };
+
+export interface XboxImportCancelRequest {
+  attemptId: string;
+}
+
 export interface EmulatorContentSuggestionPayload extends EmulatorContentRef {
   /** Server-local igdb_games.id. Local custom games use negative ids. */
   gameId: number;
@@ -169,6 +277,22 @@ export interface CommunityGameSuggestionResponse {
   igdbGame?: Game;
 }
 
+export interface CommunitySuggestionCancelPayload {
+  exeName: string;
+  gameId: number;
+  installUuid: string;
+}
+
+export type CommunitySuggestionCancelStatus =
+  | "cancelled"
+  | "not_found"
+  | "not_pending"
+  | "not_owner";
+
+export interface CommunitySuggestionCancelResponse {
+  status: CommunitySuggestionCancelStatus;
+}
+
 export type IdentifierReportReason = "not_a_game";
 
 export interface IdentifierReportPayload {
@@ -249,6 +373,37 @@ export interface GameMetadataResponse {
   games: Game[];
 }
 
+/**
+ * Extended IGDB facts for one game, shown in the desktop's game details view.
+ * Everything past `gameId`/`igdbId` is optional or an empty array: IGDB entries
+ * are unevenly filled, and a community game may have no IGDB entry at all.
+ */
+export interface GameDetails {
+  /**
+   * Keyed on the IGDB id, never a server-local game id: local ids differ
+   * between deployments (and move when community games merge), while this one
+   * identifies the same game everywhere.
+   */
+  igdbId: number;
+  /** Canonical IGDB page, as IGDB itself reports it. Never built from a slug. */
+  igdbUrl?: string;
+  summary?: string;
+  /** ISO calendar date (YYYY-MM-DD) of the first release, when IGDB knows one. */
+  releaseDate?: string;
+  releaseYear?: number;
+  developers: string[];
+  publishers: string[];
+  genres: string[];
+  gameModes: string[];
+  platforms: string[];
+  /** IGDB's aggregate score, 0-100, rounded. Absent when too few ratings. */
+  rating?: number;
+}
+
+export interface GameDetailsResponse {
+  details: GameDetails[];
+}
+
 export interface Session {
   id: number;
   gameId: number;
@@ -282,11 +437,48 @@ export interface FeedbackResponse {
   id: number;
 }
 
+export interface InstallPresencePayload {
+  installUuid: string;
+}
+
 export type Theme = "dark" | "light";
 
+/** Summary cards a My Games tab can show above the grid. */
+export type LibraryStatCardId =
+  | "games"
+  | "playtime"
+  | "tracked"
+  | "recent"
+  | "sessions"
+  | "played"
+  | "unplayed"
+  | "installed"
+  | "emulator";
+
 export interface Settings {
+  /** Global keyboard shortcuts. Null or absent means disabled. */
+  showWindowHotkey?: string | null;
+  currentSessionHotkey?: string | null;
   launchOnStartup: boolean;
   showDurationDays: boolean;
+  /** My Games card density. Absent on older persisted settings. */
+  libraryCardSize?: "grid" | "large" | "list";
+  librarySortKey?: "recent" | "playtime" | "name" | "sessions";
+  /** Retired single toggle. Still read once so an existing opt-out seeds both
+   *  of the toggles below; never written again. */
+  libraryShowBadges?: boolean;
+  /** Steam, Xbox, emulator or PlayCounter mark beside each game name. */
+  libraryShowOriginBadges?: boolean;
+  /** IGDB, Community or Custom seal in the cover corner. */
+  libraryShowMatchBadges?: boolean;
+  /** Request IGDB cover art one size up. Absent = off, the smaller default. */
+  libraryHighResCovers?: boolean;
+  /** My Games summary cards. Absent = the default set. Empty = all off. */
+  libraryStatCards?: LibraryStatCardId[];
+  /** Master switch for the My Games summary row. */
+  libraryShowStatCards?: boolean;
+  /** Drop provider tabs that have no imported games. Absent = off, tabs stay. */
+  libraryHideEmptyProviderTabs?: boolean;
   autoShareIgnoredProcesses: boolean;
   pollingIntervalSeconds: number;
   unmatchedRetryDays: number;
@@ -298,9 +490,15 @@ export interface Settings {
   emulatorContentLookup?: boolean;
   ignoredEmulatorIds?: string[];
   desktopOverlaysEnabled?: boolean;
+  /** OS display identifier, or "primary" (also the default when absent). */
+  overlayMonitor?: string;
   overlayFirstDetections?: boolean;
   overlaySessionStarts?: boolean;
   overlaySessionSummaries?: boolean;
   overlayMilestones?: boolean;
+  overlayActionRequired?: boolean;
   overlayDiscoveries?: boolean;
+  rememberLaunchPaths?: boolean;
+  gameLaunchingEnabled?: boolean;
+  controllerNavigationEnabled?: boolean;
 }

@@ -4,19 +4,28 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::Duration,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, Wry,
+    Manager, Wry,
 };
 
+mod controller;
+mod emulator_launch;
+mod hotkeys;
 mod ignored_processes;
+mod launch;
+mod library;
 mod notification_overlay;
 mod process;
 mod session;
+mod shell_open;
 
 const TRAY_STATUS_IDLE: &str = "No game active";
 const TRAY_STATUS_PREFIX: &str = "Playing ";
@@ -26,6 +35,27 @@ const DISCORD_URL: &str = "https://discord.gg/t2nG3jaEEY";
 struct TrayState {
     icon: Mutex<Option<TrayIcon<Wry>>>,
     status_item: Mutex<Option<MenuItem<Wry>>>,
+}
+
+/// The main window is created hidden so Windows never shows a bare white frame
+/// while the webview boots and the saved geometry is restored. It is revealed
+/// once the UI has painted - unless autostart launched us, in which case we
+/// stay in the tray.
+struct StartupWindow {
+    autostart: bool,
+    revealed: AtomicBool,
+}
+
+impl StartupWindow {
+    fn reveal(&self, app: &tauri::AppHandle) {
+        if self.autostart {
+            return;
+        }
+        if self.revealed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        show_main_window(app);
+    }
 }
 
 #[derive(Deserialize)]
@@ -40,6 +70,12 @@ struct TraySession {
 struct PrivacyContext {
     user_name: String,
     home_dir_name: String,
+}
+
+/// Called by the frontend once the first frame is on screen.
+#[tauri::command]
+fn main_window_ready(app: tauri::AppHandle) {
+    app.state::<StartupWindow>().reveal(&app);
 }
 
 #[tauri::command]
@@ -165,13 +201,55 @@ fn open_user_ignored_processes_folder(app: tauri::AppHandle) -> Result<(), Strin
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    let url = match url.trim() {
+    let trimmed = url.trim();
+    let url = match trimmed {
         WEBSITE_URL | "https://github.com/collerim/LudusAtlas/" => WEBSITE_URL,
         DISCORD_URL => DISCORD_URL,
+        // The game details view links out to IGDB. Unlike the two fixed URLs
+        // above this one is built at runtime, so it is validated rather than
+        // compared.
+        _ if is_allowed_igdb_url(trimmed) => trimmed,
         _ => return Err("Unsupported external URL.".to_string()),
     };
 
     open_url(url)
+}
+
+/// True only for an `https://www.igdb.com/...` URL safe to hand to the shell.
+///
+/// The prefix check settles the host on its own: a URL's authority ends at the
+/// first `/` after the scheme, so anything matching this prefix cannot smuggle
+/// in userinfo (`user@evil.test`) or a different host. What is left to reject
+/// is whitespace and control characters, which have no place in a URL and
+/// could otherwise be used to confuse the shell.
+fn is_allowed_igdb_url(url: &str) -> bool {
+    const IGDB_PREFIX: &str = "https://www.igdb.com/";
+
+    url.starts_with(IGDB_PREFIX)
+        && url.len() <= 2048
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+#[tauri::command]
+fn open_microsoft_signin_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !url.starts_with("https://login.microsoftonline.com/") {
+        return Err("Unsupported Microsoft sign-in URL.".to_string());
+    }
+
+    open_url(url)
+}
+#[tauri::command]
+fn open_xbox_app() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        return open_url("xbox://");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("The Xbox app is only available on Windows.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -199,15 +277,48 @@ fn update_tray_now_playing(
     set_tray_status(&app, &format_tray_status(&sessions))
 }
 
+fn configure_macos_test_storage(config: &mut tauri::Config) {
+    if config.identifier != "app.playcounter.desktop.test" {
+        return;
+    }
+
+    // tauri-utils 2.9.2 emits a Vec for a configured dataStoreIdentifier, but
+    // WindowConfig requires [u8; 16]. Set the same persistent test-store ID
+    // after generate_context! and before Tauri creates any configured windows.
+    for window in &mut config.app.windows {
+        window.data_store_identifier = Some([
+            93, 166, 17, 135, 225, 44, 72, 81, 170, 198, 202, 39, 76, 203, 110, 162,
+        ]);
+    }
+}
+
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    if cfg!(target_os = "macos") {
+        configure_macos_test_storage(context.config_mut());
+    }
+
     tauri::Builder::default()
         .manage(TrayState {
             icon: Mutex::new(None),
             status_item: Mutex::new(None),
         })
+        .manage(controller::ControllerWatcher::default())
+        .manage(emulator_launch::EmulatorLaunchGuard::default())
         .manage(notification_overlay::OverlayState::default())
+        .manage(hotkeys::HotkeyState::default())
+        .manage(StartupWindow {
+            autostart: launched_from_autostart(),
+            revealed: AtomicBool::new(false),
+        })
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                // VISIBLE is excluded so the plugin cannot show the window
+                // behind our back - we decide when it appears.
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
                 .with_denylist(&[notification_overlay::OVERLAY_LABEL])
                 .build(),
         )
@@ -215,6 +326,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(
@@ -222,6 +334,8 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .invoke_handler(tauri::generate_handler![
+            main_window_ready,
+            hotkeys::set_global_hotkey,
             install_uuid,
             adopt_install_uuid,
             ignored_processes,
@@ -232,29 +346,46 @@ pub fn run() {
             backup_local_data,
             open_user_ignored_processes_folder,
             open_external_url,
+            open_microsoft_signin_url,
+            open_xbox_app,
             update_tray_now_playing,
             scan_processes,
             privacy_context,
             get_exe_icon,
+            launch::launch_executable,
+            launch::reveal_executable,
+            launch::verify_launch_paths,
+            library::library_detect_providers,
+            library::library_list_accounts,
+            library::library_scan,
+            library::library_scan_xbox_local,
+            library::library_inspect_executable,
+            library::library_launch_app,
+            emulator_launch::launch_emulator_content,
+            emulator_launch::verify_emulator_content_paths,
+            controller::controller_watch_start,
+            controller::controller_watch_stop,
             notification_overlay::notification_overlay_prepare,
+            notification_overlay::notification_overlay_monitors,
             notification_overlay::notification_overlay_wait_for_game_window,
             notification_overlay::notification_overlay_show,
             notification_overlay::notification_overlay_hide,
             notification_overlay::notification_overlay_close,
             notification_overlay::notification_overlay_ready,
-            notification_overlay::notification_overlay_finished
+            notification_overlay::notification_overlay_finished,
+            notification_overlay::notification_overlay_activate
         ])
         .setup(|app| {
             setup_tray(app.handle())?;
-            if launched_from_autostart() {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-            }
-            let handle = app.handle().clone();
+            // Safety net: if the webview never gets far enough to call
+            // main_window_ready, show the window anyway rather than leaving the
+            // user with nothing but a tray icon.
+            let reveal_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                watch_processes(handle).await;
+                tokio::time::sleep(Duration::from_secs(8)).await;
+                reveal_handle
+                    .state::<StartupWindow>()
+                    .reveal(&reveal_handle);
             });
             Ok(())
         })
@@ -267,7 +398,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running LudusAtlas");
 }
 
@@ -461,51 +592,48 @@ fn open_folder(path: &Path) -> Result<(), String> {
 }
 
 fn open_url(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("rundll32.exe");
-        command.args(["url.dll,FileProtocolHandler", url]);
-        command
-    };
-
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("open");
-        command.arg(url);
-        command
-    };
-
-    #[cfg(target_os = "linux")]
-    let mut command = {
-        let mut command = Command::new("xdg-open");
-        command.arg(url);
-        command
-    };
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    return Err("Opening links is not supported on this platform.".to_string());
-
-    command.spawn().map_err(|error| error.to_string())?;
-    Ok(())
+    shell_open::open_url(url)
 }
 
-async fn watch_processes(app: tauri::AppHandle) {
-    let scanner = create_scanner();
-    let mut previous: Vec<ProcessSnapshot> = Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_igdb_url;
 
-    loop {
-        match scanner.scan().await {
-            Ok(current) => {
-                if current != previous {
-                    let _ = app.emit("processes-changed", &current);
-                    previous = current;
-                }
-            }
-            Err(error) => {
-                let _ = app.emit("process-scan-error", error.to_string());
-            }
+    #[test]
+    fn accepts_igdb_game_and_search_urls() {
+        assert!(is_allowed_igdb_url(
+            "https://www.igdb.com/games/the-witcher-3-wild-hunt"
+        ));
+        assert!(is_allowed_igdb_url(
+            "https://www.igdb.com/search?type=1&q=Half-Life%202"
+        ));
+    }
+
+    #[test]
+    fn rejects_other_hosts_and_schemes() {
+        for url in [
+            "https://igdb.com/games/doom",
+            "http://www.igdb.com/games/doom",
+            "https://www.igdb.com.evil.test/games/doom",
+            "https://evil.test/https://www.igdb.com/",
+            "file:///C:/Windows/System32/cmd.exe",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(!is_allowed_igdb_url(url), "should reject {url}");
         }
+    }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+    #[test]
+    fn rejects_whitespace_and_control_characters() {
+        assert!(!is_allowed_igdb_url("https://www.igdb.com/games/a b"));
+        assert!(!is_allowed_igdb_url("https://www.igdb.com/games/a\nb"));
+        assert!(!is_allowed_igdb_url("https://www.igdb.com/games/a\0b"));
+    }
+
+    #[test]
+    fn rejects_an_absurdly_long_url() {
+        let long = format!("https://www.igdb.com/search?q={}", "a".repeat(4096));
+        assert!(!is_allowed_igdb_url(&long));
     }
 }

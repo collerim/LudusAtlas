@@ -1,0 +1,535 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { importExeCandidates } from "./exeCandidates";
+import { buildLibraryImportCommit } from "./importPlan";
+import { mergeProviderSeconds } from "./commit";
+import {
+  providerFloorRecord,
+  providerFloors,
+  providerFloorsForProvider,
+} from "./playtimeFloor";
+import { resolveLibraryGames } from "./resolve";
+import { resolveScopedLink, scopedExeLinkKey } from "./scopedLinks";
+import type {
+  LibraryImportEntry,
+  ResolvedLibraryGame,
+  ScannedLibraryGame,
+  ScopedExeLink,
+} from "./types";
+
+const scanned: ScannedLibraryGame = {
+  externalId: "730",
+  name: "Counter-Strike 2",
+  playtimeSeconds: 7_200,
+  installed: true,
+  installPath: String.raw`C:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive`,
+  executables: [
+    {
+      fileName: "cs2.exe",
+      relativePath: String.raw`game\bin\win64\cs2.exe`,
+      sizeBytes: 80_000_000,
+      depth: 3,
+    },
+    {
+      fileName: "uninstall.exe",
+      relativePath: "uninstall.exe",
+      sizeBytes: 100,
+      depth: 0,
+    },
+  ],
+};
+
+const resolved: ResolvedLibraryGame = {
+  key: "steam:730",
+  status: "resolved",
+  game: {
+    id: 9,
+    igdbId: 1942,
+    name: "Counter-Strike 2",
+    coverUrl: "cover",
+    source: "igdb",
+  },
+  executables: [
+    {
+      platform: "windows",
+      kind: "exe",
+      value: "cs2.exe",
+      provenance: "igdb",
+      verified: true,
+    },
+  ],
+};
+
+const communityExecutable: ResolvedLibraryGame = {
+  ...resolved,
+  executables: [
+    {
+      ...resolved.executables[0],
+      provenance: "community",
+    },
+  ],
+};
+
+describe("library import", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("creates a provider floor and a safe cached executable match", () => {
+    const commit = buildLibraryImportCommit({ scanned, resolved, now: "now" });
+    expect(commit?.entry.providerSeconds).toBe(7_200);
+    expect(commit?.entry.igdbId).toBe(1942);
+    expect(commit?.exeCacheEntries.map((entry) => entry.exeName)).toEqual([
+      "cs2.exe",
+    ]);
+    expect(commit?.scopedLinks[0]).toMatchObject({
+      exeName: "cs2.exe",
+      igdbId: 1942,
+    });
+  });
+
+  it("preserves an unknown Xbox duration without coercing it to zero", () => {
+    const commit = buildLibraryImportCommit({
+      provider: "xbox",
+      scanned: {
+        ...scanned,
+        playtimeSeconds: null,
+        installed: false,
+        installPath: undefined,
+        executables: [],
+      },
+      resolved: {
+        ...resolved,
+        key: "xbox:730",
+        executables: [],
+      },
+      now: "now",
+    });
+
+    expect(commit?.entry).toMatchObject({
+      provider: "xbox",
+      providerSeconds: null,
+    });
+    expect(commit?.install).toBeUndefined();
+    expect(providerFloors(commit ? [commit.entry] : [])).toEqual([]);
+  });
+
+  it("creates an Xbox install and scoped executable link", () => {
+    const selectedExecutable = {
+      fileName: "Game.exe",
+      relativePath: "Game.exe",
+      sizeBytes: 80_000_000,
+      depth: 0,
+      declared: true,
+    };
+    const commit = buildLibraryImportCommit({
+      provider: "xbox",
+      scanned: {
+        externalId: "1234",
+        name: "Example Game",
+        playtimeSeconds: null,
+        installed: true,
+        installPath: String.raw`C:\XboxGames\Example Game\Content`,
+        executables: [selectedExecutable],
+      },
+      resolved: {
+        ...resolved,
+        key: "xbox:1234",
+        executables: [],
+      },
+      selectedExecutable,
+      now: "now",
+    });
+
+    expect(commit?.install).toEqual({
+      provider: "xbox",
+      externalId: "1234",
+      installPath: String.raw`c:\xboxgames\example game\content`,
+      scannedAt: "now",
+    });
+    expect(commit?.scopedLinks).toHaveLength(1);
+    expect(commit?.scopedLinks[0]).toMatchObject({
+      exeName: "Game.exe",
+      pathPrefix: String.raw`c:\xboxgames\example game\content`,
+      provider: "xbox",
+      externalId: "1234",
+      source: "custom",
+    });
+  });
+
+  it("keeps a manually selected known Xbox executable IGDB-only", () => {
+    const selectedExecutable = {
+      fileName: "Gang Beasts.exe",
+      relativePath: "Gang Beasts.exe",
+      sizeBytes: 80_000_000,
+      depth: 0,
+      declared: true,
+    };
+    const commit = buildLibraryImportCommit({
+      provider: "xbox",
+      scanned: {
+        externalId: "629270283",
+        name: "Gang Beasts",
+        playtimeSeconds: 13_980,
+        installed: true,
+        installPath: String.raw`D:\XboxGames\Gang Beasts\Content`,
+        executables: [selectedExecutable],
+      },
+      resolved: {
+        key: "xbox:629270283",
+        status: "resolved",
+        game: {
+          id: 18_537,
+          igdbId: 11_177,
+          name: "Gang Beasts",
+          coverUrl: "cover",
+          source: "igdb",
+        },
+        executables: [
+          {
+            platform: "windows",
+            kind: "exe",
+            value: "gang beasts.exe",
+            provenance: "igdb",
+            verified: true,
+          },
+        ],
+      },
+      selectedExecutable,
+      now: "now",
+    });
+
+    expect(commit?.entry.linkedExeNames).toEqual(["gang beasts.exe"]);
+    expect(commit?.entry.linkedExeSources).toEqual(["igdb"]);
+    expect(commit?.exeCacheEntries).toHaveLength(1);
+    expect(commit?.exeCacheEntries[0]).toMatchObject({
+      source: "igdb",
+      identifierSource: "igdb",
+    });
+    expect(commit?.scopedLinks).toHaveLength(1);
+    expect(commit?.scopedLinks[0]).toMatchObject({
+      source: "igdb",
+      identifierSource: "igdb",
+    });
+  });
+
+  it("keeps known provider time when a later import has unknown duration", () => {
+    expect(mergeProviderSeconds(7_200, null)).toBe(7_200);
+    expect(mergeProviderSeconds(null, null)).toBeNull();
+    expect(mergeProviderSeconds(null, 3_600)).toBe(3_600);
+  });
+
+  it("never lowers or doubles provider time when a game is imported again", () => {
+    expect(mergeProviderSeconds(7_200, 7_200)).toBe(7_200);
+    expect(mergeProviderSeconds(7_200, 9_000)).toBe(9_000);
+    expect(mergeProviderSeconds(9_000, 7_200)).toBe(9_000);
+  });
+
+  it("keeps executable provenance separate from IGDB game identity", () => {
+    const commit = buildLibraryImportCommit({
+      scanned,
+      resolved: communityExecutable,
+      now: "now",
+    });
+
+    expect(commit?.exeCacheEntries[0]).toMatchObject({
+      gameId: resolved.game?.id,
+      source: "igdb",
+      identifierSource: "community",
+    });
+    expect(commit?.entry.linkedExeSources).toEqual(["community"]);
+    expect(commit?.scopedLinks[0]).toMatchObject({
+      gameId: resolved.game?.id,
+      source: "igdb",
+      identifierSource: "community",
+    });
+  });
+
+  it("keeps an ambiguous AppID match local", () => {
+    const ambiguous = {
+      ...resolved,
+      executables: [{ ...resolved.executables[0], ambiguous: true }],
+    };
+    const commit = buildLibraryImportCommit({ scanned, resolved: ambiguous });
+    expect(commit?.exeCacheEntries[0]).toMatchObject({
+      exeName: "cs2.exe",
+      igdbId: 1942,
+      identifierSource: "igdb",
+      libraryProvider: "steam",
+    });
+    expect(commit?.scopedLinks[0]).toMatchObject({
+      exeName: "cs2.exe",
+      igdbId: 1942,
+      provider: "steam",
+    });
+
+    const noKnown = { ...resolved, executables: [] };
+    const manual = buildLibraryImportCommit({
+      scanned,
+      resolved: noKnown,
+      selectedExecutable: scanned.executables[0],
+    });
+    expect(manual?.exeCacheEntries[0]).toMatchObject({
+      exeName: "cs2.exe",
+      source: "custom",
+      igdbId: 1942,
+      shareState: "unshared",
+    });
+
+    const generic = buildLibraryImportCommit({
+      scanned: {
+        ...scanned,
+        executables: [
+          {
+            fileName: "game.exe",
+            relativePath: "game.exe",
+            sizeBytes: 1_000_000,
+            depth: 0,
+          },
+        ],
+      },
+      resolved: noKnown,
+      selectedExecutable: {
+        fileName: "game.exe",
+        relativePath: "game.exe",
+        sizeBytes: 1_000_000,
+        depth: 0,
+      },
+    });
+    expect(generic?.scopedLinks[0]).toMatchObject({
+      exeName: "game.exe",
+      source: "custom",
+      shareState: "unshared",
+    });
+  });
+
+  it("caches a verified ambiguous executable missed by the local scan", () => {
+    const commit = buildLibraryImportCommit({
+      scanned: { ...scanned, executables: [] },
+      resolved: {
+        ...resolved,
+        executables: [{ ...resolved.executables[0], ambiguous: true }],
+      },
+    });
+
+    expect(commit?.exeCacheEntries[0]).toMatchObject({
+      exeName: "cs2.exe",
+      gameId: 9,
+      igdbId: 1942,
+      source: "igdb",
+      identifierSource: "igdb",
+    });
+    expect(commit?.scopedLinks[0]).toMatchObject({
+      exeName: "cs2.exe",
+      pathPrefix: String.raw`c:\steamlibrary\steamapps\common\counter-strike global offensive`,
+      source: "igdb",
+      externalId: "730",
+    });
+  });
+  it("uses an AppID-resolved executable for an uninstalled import", () => {
+    const commit = buildLibraryImportCommit({
+      scanned: {
+        ...scanned,
+        installed: false,
+        installPath: undefined,
+        executables: [],
+      },
+      resolved: {
+        ...resolved,
+        executables: [{ ...resolved.executables[0], ambiguous: true }],
+      },
+    });
+
+    expect(commit?.entry).toMatchObject({
+      linkedExeNames: ["cs2.exe"],
+      linkedExeSources: ["igdb"],
+    });
+    expect(commit?.exeCacheEntries[0]).toMatchObject({
+      exeName: "cs2.exe",
+      gameId: 9,
+      igdbId: 1942,
+      source: "igdb",
+      identifierSource: "igdb",
+      libraryProvider: "steam",
+      libraryExternalId: "730",
+    });
+    expect(commit?.scopedLinks).toEqual([]);
+  });
+
+  it("ranks known game executables and removes installer noise", () => {
+    const candidates = importExeCandidates(
+      scanned.executables,
+      resolved.executables,
+      "Counter-Strike 2",
+    );
+    expect(candidates.map((item) => item.fileName)).toEqual(["cs2.exe"]);
+  });
+
+  it("keeps a small config-declared Xbox executable", () => {
+    expect(
+      importExeCandidates(
+        [
+          {
+            fileName: "TinyGame.exe",
+            relativePath: "TinyGame.exe",
+            sizeBytes: 4,
+            depth: 0,
+            declared: true,
+          },
+        ],
+        [],
+        "Tiny Game",
+      ).map((item) => item.fileName),
+    ).toEqual(["TinyGame.exe"]);
+  });
+
+  it("ranks executable candidates when Steam has no manifest name", () => {
+    expect(
+      importExeCandidates(scanned.executables, [], null).map(
+        (item) => item.fileName,
+      ),
+    ).toEqual(["cs2.exe"]);
+  });
+
+  it("merges multiple provider records into the highest IGDB floor", () => {
+    const base: LibraryImportEntry = {
+      provider: "steam",
+      externalId: "730",
+      igdbId: 1942,
+      gameId: 9,
+      source: "igdb",
+      name: "Counter-Strike 2",
+      coverUrl: "cover",
+      importedAt: "now",
+      providerSeconds: 7_200,
+      lastReadAt: "now",
+      linkedExeNames: [],
+      linkedExeSources: [],
+    };
+    const record = providerFloorRecord(
+      providerFloors([
+        base,
+        { ...base, externalId: "731", providerSeconds: 6_000 },
+      ]),
+    );
+    expect(record).toEqual({ "igdb#1942": 7_200 });
+  });
+
+  it("scopes provider floors before selecting the highest playtime", () => {
+    const base: LibraryImportEntry = {
+      provider: "steam",
+      externalId: "730",
+      igdbId: 1942,
+      gameId: 9,
+      source: "igdb",
+      name: "Counter-Strike 2",
+      coverUrl: "cover",
+      importedAt: "now",
+      providerSeconds: 7_200,
+      lastReadAt: "now",
+      linkedExeNames: [],
+      linkedExeSources: [],
+    };
+    const futureProviderEntry = {
+      ...base,
+      provider: "future-provider",
+      providerSeconds: 72_000,
+    } as unknown as LibraryImportEntry;
+
+    expect(
+      providerFloorRecord(
+        providerFloorsForProvider([base, futureProviderEntry], "steam"),
+      ),
+    ).toEqual({ "igdb#1942": 7_200 });
+  });
+
+  it("probes the resolver capability without uploading playtime or paths", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          results: [
+            {
+              key: "steam:730",
+              status: "resolved",
+              game: resolved.game,
+              executables: resolved.executables,
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await resolveLibraryGames("https://api.example/", "steam", [
+      scanned,
+    ]);
+    expect(outcome.capability).toBe("supported");
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toEqual({
+      items: [{ key: "steam:730", provider: "steam", externalId: "730" }],
+    });
+  });
+
+  it("disables import cleanly when the backend lacks the resolver", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(null, { status: 404 })),
+    );
+    await expect(
+      resolveLibraryGames("https://api.example", "steam", [scanned]),
+    ).resolves.toEqual({ capability: "unsupported", games: [] });
+  });
+
+  it("capability-probes the resolver even when Steam has no games", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ results: [] }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      resolveLibraryGames("https://api.example///", "steam", []),
+    ).resolves.toEqual({ capability: "supported", games: [] });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example/api/library/resolve",
+      expect.objectContaining({ body: JSON.stringify({ items: [] }) }),
+    );
+  });
+});
+
+describe("path-scoped executable links", () => {
+  const link = {
+    exeName: "game.exe",
+    pathPrefix: String.raw`C:\Steam\common\Actual Game`,
+    gameId: 9,
+    source: "igdb",
+    igdbId: 10,
+    gameName: "Actual Game",
+    coverUrl: "cover",
+    provider: "steam",
+    externalId: "1",
+    setAt: "now",
+  } satisfies ScopedExeLink;
+
+  it("matches only a process beneath the normalized install root", () => {
+    const links = new Map([
+      [scopedExeLinkKey(link.exeName, link.pathPrefix)!, link],
+    ]);
+    expect(
+      resolveScopedLink(
+        {
+          exeName: "GAME.EXE",
+          exePath: String.raw`c:\steam\common\actual game\bin\game.exe`,
+        },
+        links,
+      )?.igdbId,
+    ).toBe(10);
+    expect(
+      resolveScopedLink(
+        {
+          exeName: "game.exe",
+          exePath: String.raw`C:\Steam\common\Actual Game 2\game.exe`,
+        },
+        links,
+      ),
+    ).toBeNull();
+  });
+});

@@ -3,7 +3,9 @@ type Snapshot = {
   exePath: string | null;
   emulatorId?: string | null;
   commandLine?: string[] | null;
+  workingDirectory?: string | null;
   windowTitle?: string | null;
+  openFiles?: string[] | null;
   [key: string]: unknown;
 };
 
@@ -11,7 +13,9 @@ export function toPublicSnapshots<T extends Snapshot>(snapshots: T[]): T[] {
   const publicSnapshots = snapshots.map((snapshot) => {
     const {
       commandLine: _commandLine,
+      workingDirectory: _workingDirectory,
       windowTitle: _windowTitle,
+      openFiles: _openFiles,
       ...safe
     } = snapshot;
     return safe as T;

@@ -1,6 +1,12 @@
 import type { Session, Settings } from "@playcounter/shared";
-import { describe, expect, it, vi } from "vitest";
-import { persistAppState } from "./persistence";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  createPersistedPayload,
+  persistAppState,
+  STORAGE_KEY,
+  writePersistedRecord,
+} from "./persistence";
+import * as sessionPersistence from "./sessionPersistence";
 import type { AppNotification } from "./notifications";
 import {
   MAX_STORED_SESSIONS,
@@ -41,6 +47,8 @@ function makeState(
     contributionOwnerUuid: null,
     settings,
     exeCache: new Map(),
+    launchTargets: new Map(),
+    manualLaunchTargets: new Map(),
     gameMetadata: new Map(),
     recentSessions,
     activeSessions: [],
@@ -79,7 +87,195 @@ function makeState(
   };
 }
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("session persistence", () => {
+  it("skips unchanged saves and reuses history normalization and serialization", () => {
+    const setItem = vi.fn();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem },
+    });
+    const session = makeSession(1);
+    const state = makeState([session]);
+    const expected = JSON.stringify(createPersistedPayload(state));
+    const normalize = vi.spyOn(sessionPersistence, "normalizeSessions");
+    const stringify = vi.spyOn(JSON, "stringify");
+    expect(persistAppState(state).status).toBe("saved");
+    expect(setItem).toHaveBeenLastCalledWith(STORAGE_KEY, expected);
+    expect(normalize).toHaveBeenCalledTimes(1);
+    normalize.mockClear();
+    stringify.mockClear();
+
+    // Scans replace some collections even when their contents are unchanged.
+    persistAppState({
+      ...state,
+      exeCache: new Map(),
+      recentSessions: [...state.recentSessions],
+    });
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(normalize).not.toHaveBeenCalled();
+    expect(
+      stringify.mock.calls.some(
+        ([value]) => Array.isArray(value) && value.includes(session),
+      ),
+    ).toBe(false);
+
+    persistAppState({
+      ...state,
+      activeSessions: [{ checkpointedAt: "2026-09-06T10:00:00Z" }],
+    });
+    expect(setItem).toHaveBeenCalledTimes(2);
+    expect(normalize).not.toHaveBeenCalled();
+    expect(
+      stringify.mock.calls.some(
+        ([value]) => Array.isArray(value) && value.includes(session),
+      ),
+    ).toBe(false);
+    expect(JSON.parse(setItem.mock.calls[1][1]).activeSessions).toEqual([
+      { checkpointedAt: "2026-09-06T10:00:00Z" },
+    ]);
+  });
+
+  it("immediately saves settings and history changes", () => {
+    const setItem = vi.fn();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem },
+    });
+    const state = makeState([makeSession(1)]);
+    persistAppState(state);
+    const updated = {
+      ...state,
+      settings: { ...state.settings, pollingIntervalSeconds: 10 },
+    };
+    persistAppState(updated);
+    expect(
+      JSON.parse(setItem.mock.calls[1][1]).settings.pollingIntervalSeconds,
+    ).toBe(10);
+    persistAppState({
+      ...updated,
+      recentSessions: [makeSession(2), ...state.recentSessions],
+    });
+    expect(JSON.parse(setItem.mock.calls[2][1]).sessions).toHaveLength(2);
+  });
+
+  it("retries identical state after a failed write", () => {
+    const setItem = vi.fn().mockImplementationOnce(() => {
+      throw new Error("Unavailable");
+    });
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem },
+    });
+    const state = makeState([makeSession(1)]);
+    expect(persistAppState(state).status).toBe("failed");
+    expect(persistAppState(state).status).toBe("saved");
+    expect(setItem).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates cached saves when backup data replaces storage", () => {
+    const setItem = vi.fn();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem },
+    });
+    const state = makeState([makeSession(1)]);
+    persistAppState(state);
+    writePersistedRecord({ sessions: [] });
+    persistAppState(state);
+    expect(setItem).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(setItem.mock.calls[2][1]).sessions).toHaveLength(1);
+  });
+
+  it("persists launch targets as machine-local records", () => {
+    const setItem = vi.fn();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem },
+    });
+
+    persistAppState({
+      ...makeState([]),
+      launchTargets: new Map([
+        [
+          "game.exe",
+          {
+            exeName: "Game.exe",
+            path: String.raw`C:\Games\Game.exe`,
+            owner: { gameId: 42, source: "igdb" },
+          },
+        ],
+      ]),
+    });
+
+    expect(JSON.parse(setItem.mock.calls[0][1]).launchTargets).toEqual([
+      {
+        exeName: "Game.exe",
+        path: String.raw`C:\Games\Game.exe`,
+        owner: { gameId: 42, source: "igdb" },
+      },
+    ]);
+  });
+
+  it("persists game-owned manual launcher overrides separately", () => {
+    const setItem = vi.fn();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem },
+    });
+    const target = {
+      exeName: "Launcher.exe",
+      path: String.raw`C:\Games\Launcher.exe`,
+      owner: { gameId: 42, source: "igdb" as const },
+    };
+
+    persistAppState({
+      ...makeState([]),
+      manualLaunchTargets: new Map([["42:igdb", target]]),
+    });
+
+    expect(JSON.parse(setItem.mock.calls[0][1]).manualLaunchTargets).toEqual([
+      target,
+    ]);
+  });
+
+  it("persists emulator binaries and game files as device-local records", () => {
+    const setItem = vi.fn();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem },
+    });
+    const binary = {
+      emulatorId: "dolphin",
+      exePath: String.raw`C:\Emulators\Dolphin.exe`,
+      setAt: "2026-08-24T00:00:00.000Z",
+    };
+    const target = {
+      emulatorId: "dolphin",
+      contentKey: "dolphin:rom:the sims 2.rvz",
+      filePath: String.raw`D:\Games\The Sims 2.rvz`,
+      setAt: "2026-08-24T00:00:00.000Z",
+    };
+    const candidate = {
+      ...target,
+      contentKey: "dolphin:title_id:g4op69",
+      displayName: "The Sims 2.rvz",
+    };
+
+    persistAppState({
+      ...makeState([]),
+      emulatorAutoBinaries: new Map([["dolphin", binary]]),
+      emulatorManualLaunchTargets: new Map([[target.contentKey, target]]),
+      emulatorLaunchCandidates: new Map([[candidate.contentKey, candidate]]),
+    });
+
+    const payload = JSON.parse(setItem.mock.calls[0][1]);
+    expect(payload.emulatorAutoBinaries).toEqual([binary]);
+    expect(payload.emulatorManualLaunchTargets).toEqual([target]);
+    expect(payload.emulatorLaunchCandidates).toEqual([candidate]);
+  });
+
   it("persists the last acknowledged release notes version when present", () => {
     const setItem = vi.fn();
     Object.defineProperty(globalThis, "localStorage", {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  discoverDolphinLaunchTarget,
   dolphinAdapter,
   readDolphinCommandLine,
   readDolphinTitle,
@@ -8,6 +9,46 @@ import {
 const context = { denylist: new Set<string>(), privateTokens: ["philip"] };
 
 describe("Dolphin adapter", () => {
+  it("discovers the exact game file from Dolphin launch arguments", () => {
+    expect(
+      discoverDolphinLaunchTarget([
+        "--exec",
+        String.raw`D:\GameCube\The Sims 2.rvz`,
+      ]),
+    ).toEqual({
+      target: {
+        kind: "file",
+        filePath: String.raw`D:\GameCube\The Sims 2.rvz`,
+      },
+      source: "launch_arguments",
+    });
+    expect(discoverDolphinLaunchTarget(["--exec=relative-game.rvz"])).toEqual({
+      target: { kind: "file", filePath: "relative-game.rvz" },
+      source: "launch_arguments",
+    });
+    expect(discoverDolphinLaunchTarget(["--exec=memory-card.raw"])).toBeNull();
+  });
+
+  it("discovers a game opened later through Dolphin's file handle", () => {
+    expect(
+      discoverDolphinLaunchTarget([], [
+        String.raw`D:\GameCube\The Sims 2.rvz`,
+      ]),
+    ).toEqual({
+      target: {
+        kind: "file",
+        filePath: String.raw`D:\GameCube\The Sims 2.rvz`,
+      },
+      source: "open_file_handle",
+    });
+    expect(
+      discoverDolphinLaunchTarget([], [
+        String.raw`D:\GameCube\Disc 1.rvz`,
+        String.raw`D:\GameCube\Disc 2.rvz`,
+      ]),
+    ).toBeNull();
+  });
+
   it.each([
     [
       ["--exec=C:\\Games\\Super Mario Sunshine.rvz"],

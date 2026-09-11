@@ -113,11 +113,27 @@ describe("tour definitions", () => {
       "playtime",
       "matches",
       "wrong-match",
-      "copy",
       "remove",
     ]);
     expect(
       guide.steps.slice(2).every((step) => step.backTo === "open-menu"),
     ).toBe(true);
+  });
+
+  it("explains the opt-in launcher and its controller flow", () => {
+    const guide = TOURS.find((tour) => tour.id === "launch-games")!;
+    expect(guide.demoGame).toBe(true);
+    expect(guide.steps.map((step) => step.id)).toEqual([
+      "intro",
+      "enable",
+      "learned",
+      "set-forget",
+      "limits",
+      "privacy",
+      "controller",
+    ]);
+    expect(
+      guide.steps.find((step) => step.id === "controller")?.body,
+    ).toContain("Select/View + R1/RB");
   });
 });

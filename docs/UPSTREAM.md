@@ -7,9 +7,9 @@
 | Upstream project     | PlayCounter                                |
 | Upstream repository  | https://github.com/zntr1/PlayCounter       |
 | Upstream remote      | `upstream`                                 |
-| Current base commit  | `1329e0c481d911fe7fca42ac6fc30363de2eae10` |
-| Current base release | `v1.1.7`                                   |
-| Last synchronization | 2026-08-22                                 |
+| Current base commit  | `e7423dbf858dfaeb3b9252d7c47648d403ceef85` |
+| Current base release | `v1.1.16`                                  |
+| Last synchronization | 2026-09-11                                 |
 | Fork repository      | https://github.com/collerim/LudusAtlas     |
 
 The LudusAtlas fork foundation began from upstream `v1.1.5`. The first upstream
@@ -17,6 +17,13 @@ synchronization incorporated PlayCounter `v1.1.7`, including its session,
 release-notes, emulator matching, contribution-status, and tour improvements.
 Git history is intentionally preserved. LudusAtlas is an independent fork and
 must not imply official affiliation with the PlayCounter maintainers.
+
+The 2026-09-11 synchronization incorporates the 113 upstream commits through
+`e7423db` (v1.1.16), preserving both published LudusAtlas commits. It adds
+local library imports, optional launching/controller navigation, global hotkeys,
+monitor-selectable popups, game details, and upstream tracking improvements.
+The public backend/ingestion removal follows upstream; see `BACKEND.md`.
+LudusAtlas remains version 0.1.0 with its own identity and disabled updater.
 
 ## Intentional divergence
 

@@ -12,6 +12,7 @@ import type {
   EmulatorAdapter,
   EmulatorContentSignal,
   EmulatorDetectionSource,
+  EmulatorLaunchDiscovery,
   EmulatorReadContext,
   EmulatorReading,
   RawEmulatorSignals,
@@ -61,6 +62,44 @@ function parseContentFile(raw: string): ParsedSignal | null {
   };
 }
 
+function dolphinContentArgument(args: string[]) {
+  for (let index = 0; index < args.length; index += 1) {
+    const raw = optionValue(args, index, ["--exec"], "-e");
+    if (raw === null) continue;
+    const path = stripQuotes(raw).trim();
+    if (DOLPHIN_CONTENT_EXTENSION.test(basename(path))) return path;
+  }
+  for (const arg of args) {
+    if (arg.startsWith("-")) continue;
+    const path = stripQuotes(arg).trim();
+    if (DOLPHIN_CONTENT_EXTENSION.test(basename(path))) return path;
+  }
+  return null;
+}
+
+export function discoverDolphinLaunchTarget(
+  args: string[],
+  openFiles: string[] = [],
+): EmulatorLaunchDiscovery | null {
+  const filePath = dolphinContentArgument(args);
+  if (filePath) {
+    return { target: { kind: "file", filePath }, source: "launch_arguments" };
+  }
+  const uniqueOpenFiles = [
+    ...new Map(
+      openFiles
+        .filter((path) => DOLPHIN_CONTENT_EXTENSION.test(basename(path)))
+        .map((path) => [path.toLowerCase(), path]),
+    ).values(),
+  ];
+  return uniqueOpenFiles.length === 1
+    ? {
+        target: { kind: "file", filePath: uniqueOpenFiles[0] },
+        source: "open_file_handle",
+      }
+    : null;
+}
+
 function optionValue(
   args: string[],
   index: number,
@@ -92,19 +131,8 @@ export function readDolphinCommandLine(args: string[]): ParsedSignal | null {
     }
   }
 
-  for (let index = 0; index < args.length; index += 1) {
-    const raw = optionValue(args, index, ["--exec"], "-e");
-    if (raw === null) continue;
-    const parsed = parseContentFile(raw);
-    if (parsed) return parsed;
-  }
-
-  for (const arg of args) {
-    if (arg.startsWith("-")) continue;
-    const parsed = parseContentFile(arg);
-    if (parsed) return parsed;
-  }
-  return null;
+  const contentPath = dolphinContentArgument(args);
+  return contentPath ? parseContentFile(contentPath) : null;
 }
 
 export function readDolphinTitle(
@@ -200,6 +228,46 @@ function finalizeSignal(
 export const dolphinAdapter: EmulatorAdapter = {
   id: "dolphin",
   label: "Dolphin",
+  launch: {
+    targetKinds: ["file"],
+    fileExtensions: [
+      "elf",
+      "dol",
+      "gcm",
+      "iso",
+      "tgc",
+      "wbfs",
+      "ciso",
+      "gcz",
+      "wad",
+      "dff",
+      "wia",
+      "rvz",
+      "json",
+    ],
+    isValidContentFile: (fileName) => DOLPHIN_CONTENT_EXTENSION.test(fileName),
+    identifyTarget: (target, context) => {
+      const parsed = parseContentFile(target.filePath);
+      return parsed ? finalizeSignal(parsed, context) : null;
+    },
+    discoverTarget: (signals) =>
+      discoverDolphinLaunchTarget(signals.args, signals.openFiles),
+    validateTargetForMapping: (mapping, target) => {
+      if (!DOLPHIN_CONTENT_EXTENSION.test(basename(target.filePath))) {
+        return { valid: false, reason: "unsupported-content-file" };
+      }
+      if (mapping.contentKind === "title_id") {
+        // A detected target comes from Dolphin's own launch arguments or from
+        // the single supported content file held open by that same process.
+        // That live process association is stronger than a filename/ID match.
+        return { valid: true, association: "proven" };
+      }
+      const value = normalizeToken(basename(target.filePath), "rom");
+      return value === mapping.contentValue
+        ? { valid: true, association: "proven" }
+        : { valid: false, reason: "content-name-mismatch" };
+    },
+  },
   read(
     signals: RawEmulatorSignals,
     context: EmulatorReadContext,
