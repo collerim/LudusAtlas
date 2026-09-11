@@ -1,13 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildOverlayMessage,
   DesktopOverlayQueue,
   DiscoveryAggregator,
   overlayGate,
+  OVERLAY_ACTION_EVENT,
   OVERLAY_FINISHED_EVENT,
+  type DesktopOverlayKind,
   type DesktopOverlayMessage,
+  type OverlayEvent,
   type TrackerOverlayEvent,
 } from "./desktopOverlays";
 import { currentPlatform } from "./platform";
@@ -23,6 +25,59 @@ type BridgeState = {
 };
 
 let bridge: BridgeState | null = null;
+let lastRequestedSessionId: number | null = null;
+
+export function showCurrentSessionOverlay() {
+  const state = bridge;
+  if (!state || state.disposed) return;
+  const sessions = useAppStore
+    .getState()
+    .activeSessions.filter((session) => !session.recoveredFromCheckpoint);
+  const previousIndex = sessions.findIndex(
+    (session) => session.id === lastRequestedSessionId,
+  );
+  const index = (previousIndex + 1) % Math.max(1, sessions.length);
+  const session = sessions[index];
+  lastRequestedSessionId = session?.id ?? null;
+  const context = renderContext();
+  const startedAt = session ? Date.parse(session.startedAt) : context.nowMs;
+  const message = buildOverlayMessage(
+    "current-session",
+    {
+      type: "current-session",
+      gameName: session?.gameName,
+      coverUrl: session?.coverUrl,
+      durationSeconds: Number.isFinite(startedAt)
+        ? Math.max(0, Math.floor((context.nowMs - startedAt) / 1000))
+        : 0,
+      sessionIndex: index + 1,
+      sessionCount: sessions.length,
+    },
+    context,
+  );
+  state.queue.showImmediately(message);
+}
+
+export type DesktopOverlayMonitor = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+};
+
+export function listDesktopOverlayMonitors() {
+  return invoke<DesktopOverlayMonitor[]>("notification_overlay_monitors");
+}
+
+function showDesktopOverlay(message: DesktopOverlayMessage) {
+  void safeInvoke("notification_overlay_show", {
+    payload: {
+      ...message,
+      monitor: useAppStore.getState().settings.overlayMonitor ?? "primary",
+    },
+  });
+}
 
 function overlaysSupported() {
   try {
@@ -75,15 +130,6 @@ function renderContext() {
   } as const;
 }
 
-async function mainWindowIsActive() {
-  try {
-    const window = getCurrentWindow();
-    return (await window.isVisible()) && (await window.isFocused());
-  } catch {
-    return false;
-  }
-}
-
 function currentBridge(expected: BridgeState, generation: number) {
   return (
     bridge === expected &&
@@ -101,9 +147,7 @@ export function initializeDesktopOverlays() {
     setTimer: (delay, callback) =>
       globalThis.setTimeout(callback, delay) as unknown as number,
     clearTimer: (handle) => globalThis.clearTimeout(handle),
-    show: (message) => {
-      void safeInvoke("notification_overlay_show", { payload: message });
-    },
+    show: showDesktopOverlay,
     hide: (id) => {
       void safeInvoke("notification_overlay_hide", { id });
     },
@@ -124,7 +168,6 @@ export function initializeDesktopOverlays() {
       const kind = overlayGate(event, store.settings);
       if (!kind) return false;
       const message = buildOverlayMessage(kind, event, renderContext());
-      if (await mainWindowIsActive()) return false;
       if (!currentBridge(state, generation)) return false;
       const settings = useAppStore.getState().settings;
       if (
@@ -173,20 +216,33 @@ export function initializeDesktopOverlays() {
       }
     }),
   );
-  try {
-    track(
-      state,
-      getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-        if (focused) clearDesktopOverlays();
-      }),
-    );
-  } catch (error) {
-    console.warn("desktop overlay focus listener failed", error);
-  }
-
+  track(
+    state,
+    listen<string>(OVERLAY_ACTION_EVENT, ({ payload }) => {
+      if (bridge !== state || state.disposed) return;
+      if (payload === "open-now-playing") {
+        useAppStore.getState().setActiveView("now");
+      } else if (payload === "open-discovered") {
+        useAppStore.getState().setActiveView("discovered");
+      }
+    }),
+  );
   if (useAppStore.getState().settings.desktopOverlaysEnabled === true) {
     void safeInvoke("notification_overlay_prepare");
   }
+
+  // Devtools escape hatch for checking popup layouts without playing a game:
+  // __playcounterOverlayPreview("session-summary")
+  previewHost().__playcounterOverlayPreview = previewDesktopOverlay;
+  state.teardown.push(() => {
+    delete previewHost().__playcounterOverlayPreview;
+  });
+}
+
+function previewHost() {
+  return globalThis as typeof globalThis & {
+    __playcounterOverlayPreview?: (kind?: DesktopOverlayKind) => void;
+  };
 }
 
 export function armDesktopOverlays() {
@@ -213,7 +269,6 @@ export function emitOverlayEvent(event: TrackerOverlayEvent) {
       );
       if (ready !== true) return;
     }
-    if (await mainWindowIsActive()) return;
     if (!currentBridge(state, generation)) return;
     const settings = useAppStore.getState().settings;
     const kind = overlayGate(event, settings);
@@ -245,24 +300,78 @@ export function clearDesktopOverlays() {
   void safeInvoke("notification_overlay_close");
 }
 
-export function previewDesktopOverlay() {
+function previewEvent(
+  kind: DesktopOverlayKind,
+  gameName: string,
+  coverUrl: string | undefined,
+): OverlayEvent {
+  if (kind === "current-session") {
+    return {
+      type: "current-session",
+      gameName,
+      coverUrl,
+      durationSeconds: 4_200,
+    };
+  }
+  if (kind === "discovery") {
+    return { type: "discovery-burst", exeCount: 3 };
+  }
+  if (kind === "action-required") {
+    return {
+      type: "choice-required",
+      exeName: "game.exe",
+      candidateCount: 3,
+    };
+  }
+  if (kind === "first-detection" || kind === "session-start") {
+    return {
+      type: "session-started",
+      gameName,
+      coverUrl,
+      firstAutoDetection: kind === "first-detection",
+    };
+  }
+  return {
+    type: "session-ended",
+    gameName,
+    coverUrl,
+    durationSeconds: 13_320,
+    totalSeconds: 180_000,
+    ...(kind === "milestone"
+      ? {
+          milestoneTitle: "50 hours played",
+          milestoneMetric: "50 HRS",
+          milestoneGameScoped: false,
+        }
+      : {}),
+  };
+}
+
+/**
+ * Fires a sample popup so the layout can be checked without playing a game.
+ * Only the master toggle is honored; the per-kind toggles are bypassed so any
+ * kind can be inspected on demand.
+ */
+export function previewDesktopOverlay(
+  kind: DesktopOverlayKind = "first-detection",
+) {
   const state = bridge;
   if (!state || state.disposed || !state.armed) return;
   const store = useAppStore.getState();
   if (store.settings.desktopOverlaysEnabled !== true) return;
   const sample = store.recentSessions[0];
-  const event = {
-    type: "session-started",
-    gameName: sample?.gameName ?? "Sample Game",
-    coverUrl: sample?.coverUrl,
-    firstAutoDetection: true,
-  } as const;
-  const message = buildOverlayMessage(
-    "first-detection",
-    event,
-    renderContext(),
+  const event = previewEvent(
+    kind,
+    sample?.gameName ?? "Sample Game",
+    sample?.coverUrl,
   );
-  state.queue.push(message);
+  const message = buildOverlayMessage(kind, event, renderContext());
+  // Previews deliberately skip the queue. Its gating exists to protect real
+  // popups -- one at a time, priority order, a pending cap, and an eight second
+  // throttle on passive kinds -- and every one of those can drop or postpone
+  // the card the button was just clicked for.
+  state.queue.clear();
+  showDesktopOverlay(message);
 }
 
 export function disposeDesktopOverlays() {
@@ -282,6 +391,7 @@ export function disposeDesktopOverlays() {
     }
   }
   bridge = null;
+  lastRequestedSessionId = null;
 }
 
 export function desktopOverlayBridgeStateForTests(): {

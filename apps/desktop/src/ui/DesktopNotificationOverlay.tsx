@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import type { DesktopOverlayMessage } from "../desktopOverlayProtocol";
 import { applyTheme } from "../theme";
 
@@ -6,18 +6,25 @@ type Phase = "enter" | "hold" | "exit";
 
 export function DesktopNotificationOverlay({
   message,
+  onAction,
   onFinished,
 }: {
   message: DesktopOverlayMessage | null;
+  onAction: (id: string) => void;
   onFinished: (id: string) => void;
 }) {
   const [phase, setPhase] = useState<Phase>("enter");
   const [coverFailed, setCoverFailed] = useState(false);
+  const [logoFailed, setLogoFailed] = useState(false);
 
-  useEffect(() => {
+  // Layout effect, not a plain effect: a new message renders once while `phase`
+  // still holds the previous card's value, and a deferred reset lets that stale
+  // frame paint -- a visible flash before the enter animation starts.
+  useLayoutEffect(() => {
     if (!message) return;
     applyTheme(message.theme, message.accentColor);
     setCoverFailed(false);
+    setLogoFailed(false);
     setPhase("enter");
     const enterMs = message.reducedMotion ? 120 : 300;
     const exitMs = message.reducedMotion ? 120 : 200;
@@ -37,6 +44,8 @@ export function DesktopNotificationOverlay({
   const celebration =
     message.kind === "first-detection" || message.kind === "milestone";
   const compact = message.kind === "session-start";
+  const sessionSummary =
+    message.kind === "session-summary" || message.kind === "current-session";
   const phaseClass =
     phase === "enter"
       ? "overlay-card-enter"
@@ -45,10 +54,13 @@ export function DesktopNotificationOverlay({
         : "overlay-card-hold";
 
   return (
-    <div className="pointer-events-none flex h-full w-full items-start justify-end p-1">
+    <div
+      className={`${message.action ? "pointer-events-auto" : "pointer-events-none"} flex h-full w-full items-start justify-end p-1`}
+    >
       <article
-        className={`desktop-overlay-card ${phaseClass} ${celebration ? "desktop-overlay-card-celebration" : ""} ${compact ? "desktop-overlay-card-compact" : ""}`}
+        className={`desktop-overlay-card ${phaseClass} ${celebration ? "desktop-overlay-card-celebration" : ""} ${compact ? "desktop-overlay-card-compact" : ""} ${message.action ? "desktop-overlay-card-actionable" : ""}`}
         aria-live="polite"
+        onClick={message.action ? () => onAction(message.id) : undefined}
       >
         {celebration && !message.reducedMotion ? (
           <div aria-hidden="true" className="desktop-overlay-glints">
@@ -66,7 +78,16 @@ export function DesktopNotificationOverlay({
             />
           ) : (
             <div className="desktop-overlay-cover-fallback" aria-hidden="true">
-              <span>PC</span>
+              {logoFailed ? (
+                <span>PC</span>
+              ) : (
+                <img
+                  src="/icon.png"
+                  alt=""
+                  className="desktop-overlay-logo"
+                  onError={() => setLogoFailed(true)}
+                />
+              )}
             </div>
           )}
         </div>
@@ -82,7 +103,23 @@ export function DesktopNotificationOverlay({
           ) : null}
         </div>
         <div className="flex shrink-0 self-center pl-2">
-          {message.metric ? (
+          {message.action && message.actionLabel ? (
+            <button
+              type="button"
+              className="desktop-overlay-action"
+              onClick={(event) => {
+                event.stopPropagation();
+                onAction(message.id);
+              }}
+            >
+              {message.actionLabel}
+            </button>
+          ) : sessionSummary && message.metric ? (
+            <div className="desktop-overlay-session-duration">
+              <span>SESSION TIME</span>
+              <strong>{message.metric}</strong>
+            </div>
+          ) : message.metric ? (
             <span className="desktop-overlay-metric">{message.metric}</span>
           ) : message.status === "live" ? (
             <span className="desktop-overlay-live">

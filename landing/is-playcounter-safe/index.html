@@ -223,9 +223,12 @@
                 <strong>Update checks.</strong> Version checks and downloads use GitHub.
               </li>
               <li>
-                <strong>Anonymous activity, where applicable.</strong> The service
-                supports an anonymous live view of what is being played; this is not tied
-                to an account because there are no accounts.
+                <strong>Install presence.</strong> While PlayCounter runs, it
+                automatically sends a pseudonymous installation ID on startup
+                and hourly to estimate online installations. Reports contain no
+                game names or playtime history. The server keeps first/latest
+                report timestamps. Inactive records are removed after 30 days
+                during hourly cleanup.
               </li>
               <li>
                 <strong>Feedback and community match submissions.</strong> These are sent
@@ -235,7 +238,7 @@
             <p>
               What stays local: your session history, per-game totals, settings, and any
               one-time matching choices you make. The
-              <a href="/datenschutz.html">privacy notice</a> is the authoritative
+              <a href="/datenschutz">privacy notice</a> is the authoritative
               document.
             </p>
 
@@ -293,7 +296,7 @@
 
           <aside class="article-aside" aria-label="Download and related guides">
             <h2>Verify, then install</h2>
-            <p>The client and API are open source under MIT, and releases ship with published checksums so you can check the installer before running it.</p>
+            <p>The desktop client is open source under MIT, and releases ship with published checksums so you can check the installer before running it.</p>
             <a class="button button-primary" href="https://github.com/zntr1/PlayCounter/releases/latest/download/PlayCounter-Setup.exe"
               >Download for Windows</a
             >
@@ -337,7 +340,7 @@
             <details>
               <summary>Is any of my data sold or shared?</summary>
               <div class="faq-answer">
-                <p>There are no accounts, session history stays on your PC, and matching sends executable filenames without full paths. The <a href="/datenschutz.html">privacy notice</a> is the authoritative statement.</p>
+                <p>There are no accounts, session history stays on your PC, and matching sends executable filenames without full paths. The <a href="/datenschutz">privacy notice</a> is the authoritative statement.</p>
               </div>
             </details>
           </div>
@@ -383,8 +386,8 @@
             rel="noopener noreferrer"
             >Releases &amp; checksums</a
           >
-          <a href="/impressum.html">Impressum</a>
-          <a href="/datenschutz.html">Privacy</a>
+          <a href="/impressum">Impressum</a>
+          <a href="/datenschutz">Privacy</a>
         </nav>
       </div>
     </footer>

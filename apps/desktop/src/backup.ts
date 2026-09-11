@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { Session } from "@playcounter/shared";
+import { validateBackupData } from "./backupValidation";
 import {
   readPersistedRecord,
   STORAGE_KEY,
@@ -28,7 +29,18 @@ type BackupEnvelope = {
 // that produced the backup. Importing it would resurrect phantom "now playing"
 // sessions on the target machine, so we drop it on import.
 const TRANSIENT_KEYS = ["activeSessions", "activeSession", "ambiguousMatches"];
-const DEVICE_LOCAL_KEYS = ["blacklist"];
+const DEVICE_LOCAL_KEYS = [
+  "blacklist",
+  "launchTargets",
+  "manualLaunchTargets",
+  "emulatorAutoBinaries",
+  "emulatorManualBinaries",
+  "emulatorAutoLaunchTargets",
+  "emulatorManualLaunchTargets",
+  "emulatorLaunchCandidates",
+  "libraryInstalls",
+  "scopedExeLinks",
+];
 const NOTIFICATION_STATE_KEYS = [
   "notifications",
   "discoveredReviewReminder",
@@ -157,6 +169,8 @@ export async function importLocalData(): Promise<ImportResult> {
   const raw = await invoke<string>("read_text_file", { path });
   const envelope = parseEnvelope(raw);
   const data = createTransferData(envelope.data);
+  validateBackupData(data, "data");
+
   // PlayCounter and LudusAtlas may be installed side by side. Their anonymous
   // Community identities must remain independent, so a PlayCounter backup
   // transfers durable user data but never clones its install identity.

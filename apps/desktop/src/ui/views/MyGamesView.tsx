@@ -1,5 +1,4 @@
 import clsx from "clsx";
-import { createPortal } from "react-dom";
 import {
   AlertTriangle,
   Ban,
@@ -8,83 +7,139 @@ import {
   Check,
   Clock3,
   ClockPlus,
-  Copy,
+  Download,
+  ExternalLink,
   Flag,
+  FolderOpen,
+  FolderSearch,
   Gamepad2,
+  Grid2X2,
   History,
   ImagePlus,
+  Info,
   LayoutGrid,
   List,
   Loader2,
   Pencil,
+  Play,
   RotateCcw,
   Search,
   Send,
+  SlidersHorizontal,
   Trash2,
   WifiOff,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   acceptCommunityUpgrade,
   addManualSession,
   applyGameMatch,
+  applyLocalLinkGameMatch,
   applyKnownGameMatch,
+  cancelCommunitySuggestion,
   clearCustomGameCover,
   convertLocalSuggestionToCommunity,
   dismissCommunityUpgrade,
   doNotTrackGame,
   findGameMatches,
+  forgetLaunchTarget,
+  forgetManualLaunchTarget,
+  forgetEmulatorLaunchTarget,
+  confirmEmulatorLaunchCandidate,
+  launchGame,
+  launchEmulatorGame,
   convertToCustomGame,
   hydrateGameMetadata,
   markCommunitySuggestionRejected,
   renameCustomGame,
+  revealGameExecutable,
   reportNegativeMatch,
+  scanProcessesNow,
+  chooseLaunchTarget,
+  chooseEmulatorLaunchFile,
   setGamePlaytime,
   setCustomGameCover,
   suggestTrackedGameToCommunity,
+  submitLocalLinkToCommunity,
   untrackGame,
+  verifyLaunchTargetsThrottled,
   type GameAliasRef,
 } from "../../tracker";
 import {
   canSuggestCustomGameToCommunity,
   canSwitchApprovedSuggestionToCommunity,
   createGameIdentityResolver,
+  findPendingCommunitySuggestionEntry,
   gameMetadataKey,
   resolvedCanonicalGameKey,
   useAppStore,
   useIsOffline,
   type ActiveSession,
   type ExeCacheEntry,
+  type PendingCommunitySuggestionTarget,
 } from "../../store";
 import { CommunitySuggestionForm } from "./DiscoveredView";
 import { matchesProcessPatternSet } from "../../ignoredProcessPatterns";
 import { gameSecondsKeys } from "../../gameSeconds";
-import {
-  communityMetadataSearchUrl,
-  mergeCommunityMetadataCandidates,
-  type CommunityMetadataSearchOptions,
-} from "../../communityMetadataSearch";
+import { useCommunityGameCorrection } from "../useCommunityGameCorrection";
 import {
   adjustmentSecondsFor,
-  displayTotalSeconds,
+  effectiveTotalSeconds,
 } from "../../playtimeAdjustments";
 import {
-  CommunityApprovalBadge,
-  EmulatorBadge,
+  providerFloorKey,
+  providerFloorRecord,
+  providerFloors,
+  providerFloorsForProvider,
+} from "../../library/playtimeFloor";
+import { commitLibraryImports } from "../../library/commit";
+import { LibraryMatchOffer } from "../LibraryMatchOffer";
+import {
+  dismissLibraryMatchOffer,
+  useLibraryMatchOffers,
+} from "../../library/matchOffers";
+import {
+  checkLibraryImportForMatches,
+  type LibraryImportMatchCheck,
+} from "../../library/recheck";
+import {
+  libraryLaunchErrorMessage,
+  shouldForgetLibraryInstallOnLaunchError,
+} from "../../library/launchErrors";
+import {
+  libraryEntryKey,
+  type LibraryImportEntry,
+  type LibraryInstallEntry,
+} from "../../library/types";
+import { listLocalLinks, type LocalLink } from "../../localLinks";
+import {
+  GameMatchBadges,
+  GameOriginBadges,
+  GameProvenanceBadges,
   Panel,
   SourceBadge,
+  Stat,
+  communitySuggestionApproval,
   formatDuration,
 } from "../components";
 import {
   Button,
   ContextMenu,
+  ContextMenuHeading,
   ContextMenuItem,
   ContextMenuSeparator,
   IconButton,
   Input,
   Modal,
   useContextMenu,
-  useEscapeKey,
 } from "../primitives";
 import {
   initialMatchSelection,
@@ -92,25 +147,80 @@ import {
   sortMatchCandidates,
 } from "./matchCheckModel";
 import { ReportWrongMatchDialog } from "../ReportWrongMatchDialog";
+import { GameDetailsDialog } from "./games/GameDetailsDialog";
+import { GameCover } from "../GameCover";
+import { CancelCommunitySuggestionDialog } from "../CancelCommunitySuggestionDialog";
 import type {
-  CommunityGameSuggestionResponse,
-  CommunityMetadataCandidate,
-  CommunityMetadataSearchResponse,
   ContributionStatus,
   Game,
   GameSource,
   IdentifierFlagReason,
+  LibraryProviderId,
 } from "@playcounter/shared";
 import { TOUR_DEMO_GAME } from "../tour/tourDemoGame";
 import { emitTourEvent, useTourDemo } from "../tour/TourUI";
-import { compareMyGames, type MyGamesSortKey } from "../myGamesSort";
+import {
+  LAST_PLAYED_PROMOTION_DELAY_MS,
+  compareMyGames,
+  mergeLastPlayedEvidence,
+  shouldPromoteActiveGame,
+  type MyGamesSortKey,
+} from "../myGamesSort";
 import {
   isTourDemoLibraryGame,
   type LibraryGameKind,
 } from "../libraryGameKind";
+import { CommunityLevelUpButton } from "../CommunityLevelUpButton";
+import { XboxButtonGlyph } from "../XboxButtonGlyph";
+import {
+  findManualLaunchTarget,
+  launchErrorDetail,
+  launchErrorMessage,
+  launchTargetsForGame,
+} from "../../gameLaunch";
+import {
+  emulatorLaunchErrorMessage,
+  resolveEmulatorLaunchTarget,
+} from "../../emulatorLaunch";
+import { adapterFor } from "../../emulators/registry";
+import { currentPlatform } from "../../platform";
+import { CONTROLLER_LIBRARY_VIEW_EVENT } from "../../controllerBridge";
+import {
+  hasUnknownProviderPlaytime,
+  libraryProviders,
+  trackingUnavailableMessage,
+} from "../providerLibrary";
+import { myGamesLayout } from "../myGamesLayout";
+import {
+  filterByLibraryTab,
+  hasEmptyProviderTabs,
+  resolveLibraryTab,
+  visibleLibraryTabs,
+} from "../libraryTabs";
+import {
+  libraryStatCards,
+  libraryStatDefinitionsForKind,
+  resolveLibraryStatCardIds,
+  summarizeLibraryStats,
+  toggleLibraryStatCardIds,
+  type LibraryStatCard,
+} from "../myGamesStats";
+import {
+  importableProviderTabs,
+  isImportableProviderTabConfig,
+  providerTabConfig,
+  PROVIDER_TAB_CONFIGS,
+  type ImportableProviderTabConfig,
+} from "../libraryProviderTabs";
+import { type MyGamesCardSize } from "../myGamesPresentation";
+import {
+  INITIAL_LIBRARY_RENDER_COUNT,
+  nextLibraryRenderLimit,
+} from "../libraryRenderWindow";
+import { libraryContextActions } from "../gameLibraryActions";
 
 type SortKey = MyGamesSortKey;
-type ViewMode = "grid" | "list";
+type ViewMode = MyGamesCardSize;
 
 const sortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "recent", label: "Last played" },
@@ -130,6 +240,7 @@ type GameSummary = {
   coverUrl: string;
   source: GameSource | null;
   sources: GameSource[];
+  hasExplicitIdentifierSource?: boolean;
   aliases: GameAliasRef[];
   communitySuggestionId?: number;
   communitySuggestionVerified?: boolean;
@@ -150,6 +261,15 @@ type GameSummary = {
   exeNames: string[];
   emulatorLabels: string[];
   emulatorIds: string[];
+  emulatorContentKeys: string[];
+  libraryImports: Array<{
+    provider: LibraryProviderId;
+    externalId: string;
+    installed: boolean;
+    entry: LibraryImportEntry;
+    install?: LibraryInstallEntry;
+  }>;
+  providerFloorSeconds: number;
 };
 
 type PendingRemoval = {
@@ -157,6 +277,7 @@ type PendingRemoval = {
   source: GameSource | null;
   name: string;
   aliases: GameAliasRef[];
+  libraryImports: GameSummary["libraryImports"];
 } | null;
 
 type PendingStopTracking = {
@@ -199,6 +320,9 @@ function makeTourDemoGame(
     exeNames: [TOUR_DEMO_GAME.exeName],
     emulatorLabels: [],
     emulatorIds: [],
+    emulatorContentKeys: [],
+    libraryImports: [],
+    providerFloorSeconds: 0,
   };
 }
 
@@ -224,6 +348,9 @@ function makeCoreTourDemoGames(): GameSummary[] {
       exeNames: [TOUR_DEMO_GAME.exeName],
       emulatorLabels: [],
       emulatorIds: [],
+      emulatorContentKeys: [],
+      libraryImports: [],
+      providerFloorSeconds: 0,
     },
     {
       kind: "tour-demo",
@@ -244,6 +371,9 @@ function makeCoreTourDemoGames(): GameSummary[] {
       exeNames: ["GTA5.exe"],
       emulatorLabels: [],
       emulatorIds: [],
+      emulatorContentKeys: [],
+      libraryImports: [],
+      providerFloorSeconds: 0,
     },
   ];
 }
@@ -296,6 +426,70 @@ function formatGameActivity(game: GameSummary) {
     : `Added ${formatLastPlayed(game.lastPlayedAt)}`;
 }
 
+function LibraryStatRow({
+  cards,
+  showDurationDays,
+}: {
+  cards: readonly LibraryStatCard[];
+  showDurationDays: boolean;
+}) {
+  if (cards.length === 0) return null;
+  return (
+    // auto-fit, not a fixed four: the row stays even whatever the user picks.
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[repeat(auto-fit,minmax(200px,1fr))]">
+      {cards.map((card) => (
+        <Stat
+          key={card.id}
+          label={card.label}
+          value={
+            card.format === "duration"
+              ? formatDuration(card.value, showDurationDays)
+              : String(card.value)
+          }
+        />
+      ))}
+    </div>
+  );
+}
+
+function playButtonState(
+  gameName: string,
+  launching: boolean,
+  hasActiveSession: boolean,
+  launchBlocked: boolean,
+) {
+  if (launching) {
+    return {
+      ariaLabel: `Starting ${gameName}`,
+      title: "Starting…",
+      disabled: true,
+      loading: true,
+    };
+  }
+  if (hasActiveSession) {
+    return {
+      ariaLabel: `${gameName} is already running`,
+      title: "Already running",
+      disabled: true,
+      loading: false,
+    };
+  }
+  if (launchBlocked) {
+    return {
+      ariaLabel: `Play ${gameName} (unavailable, another game is starting)`,
+      title: "Another game is starting",
+      disabled: true,
+      loading: false,
+    };
+  }
+  return {
+    ariaLabel: `Play ${gameName}`,
+    title: "Play",
+    disabled: false,
+    loading: false,
+  };
+}
+
 function activeDurationSeconds(activeSession: ActiveSession) {
   return Math.max(
     0,
@@ -317,26 +511,115 @@ export function MyGamesView() {
   const [pendingStopTracking, setPendingStopTracking] =
     useState<PendingStopTracking>(null);
   const [query, setQuery] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("recent");
-  const [view, setView] = useState<ViewMode>("grid");
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [recentSortNow, setRecentSortNow] = useState(() => Date.now());
+  const launchLockRef = useRef<string | null>(null);
+  const [launchingGameKey, setLaunchingGameKey] = useState<string | null>(null);
   const sessions = useAppStore((state) => state.recentSessions);
+  const libraryTab = useAppStore((state) => state.libraryTab);
+  const setLibraryTab = useAppStore((state) => state.setLibraryTab);
+  const setLibraryImportProvider = useAppStore(
+    (state) => state.setLibraryImportProvider,
+  );
+  const setActiveView = useAppStore((state) => state.setActiveView);
   const activeSessions = useAppStore((state) => state.activeSessions);
   const archivedGameSeconds = useAppStore((state) => state.archivedGameSeconds);
   const playtimeAdjustments = useAppStore((state) => state.playtimeAdjustments);
   const exeCache = useAppStore((state) => state.exeCache);
+  const scopedExeLinks = useAppStore((state) => state.scopedExeLinks);
+  const libraryImports = useAppStore((state) => state.libraryImports);
+  const libraryInstalls = useAppStore((state) => state.libraryInstalls);
   const hydratedGameMetadata = useAppStore((state) => state.gameMetadata);
+  const emulatorMappings = useAppStore((state) => state.emulatorMappings);
   const showDurationDays = useAppStore(
     (state) => state.settings.showDurationDays,
+  );
+  const cardSize = useAppStore(
+    (state) => state.settings.libraryCardSize ?? "grid",
+  );
+  const sortKey = useAppStore(
+    (state) => state.settings.librarySortKey ?? "recent",
+  );
+  const showOrigin = useAppStore(
+    (state) => state.settings.libraryShowOriginBadges !== false,
+  );
+  const showMatch = useAppStore(
+    (state) => state.settings.libraryShowMatchBadges !== false,
+  );
+  const setMyGamesCardSize = useAppStore((state) => state.setMyGamesCardSize);
+  const setMyGamesSortKey = useAppStore((state) => state.setMyGamesSortKey);
+  const setMyGamesShowOriginBadges = useAppStore(
+    (state) => state.setMyGamesShowOriginBadges,
+  );
+  const setMyGamesShowMatchBadges = useAppStore(
+    (state) => state.setMyGamesShowMatchBadges,
+  );
+  const highResCovers = useAppStore(
+    (state) => state.settings.libraryHighResCovers === true,
+  );
+  const setMyGamesHighResCovers = useAppStore(
+    (state) => state.setMyGamesHighResCovers,
+  );
+  const showStatCards = useAppStore(
+    (state) => state.settings.libraryShowStatCards !== false,
+  );
+  const statCardSetting = useAppStore(
+    (state) => state.settings.libraryStatCards,
+  );
+  const setMyGamesShowStatCards = useAppStore(
+    (state) => state.setMyGamesShowStatCards,
+  );
+  const setMyGamesStatCards = useAppStore((state) => state.setMyGamesStatCards);
+  const hideEmptyProviderTabs = useAppStore(
+    (state) => state.settings.libraryHideEmptyProviderTabs === true,
+  );
+  const setMyGamesHideEmptyProviderTabs = useAppStore(
+    (state) => state.setMyGamesHideEmptyProviderTabs,
+  );
+  const statCardIds = useMemo(
+    () => resolveLibraryStatCardIds({ libraryStatCards: statCardSetting }),
+    [statCardSetting],
+  );
+  const view = cardSize;
+  const gameLaunchingEnabled = useAppStore(
+    (state) => state.settings.gameLaunchingEnabled === true,
   );
   const userIgnoredProcesses = useAppStore(
     (state) => state.userIgnoredProcesses,
   );
   const blacklist = useAppStore((state) => state.blacklist);
   const addToast = useAppStore((state) => state.addToast);
+  const removeLibraryImport = useAppStore((state) => state.removeLibraryImport);
   const resolveIgdbId = useMemo(
-    () => createGameIdentityResolver(hydratedGameMetadata, exeCache),
-    [exeCache, hydratedGameMetadata],
+    () =>
+      createGameIdentityResolver(
+        hydratedGameMetadata,
+        exeCache,
+        libraryImports,
+      ),
+    [exeCache, hydratedGameMetadata, libraryImports],
   );
+  const providerFloorSeconds = useMemo(
+    () => providerFloorRecord(providerFloors(libraryImports.values())),
+    [libraryImports],
+  );
+  const localLinks = useMemo(
+    () => listLocalLinks(exeCache, scopedExeLinks),
+    [exeCache, scopedExeLinks],
+  );
+
+  const acquireLaunchLock = useCallback((gameKey: string) => {
+    if (launchLockRef.current !== null) return false;
+    launchLockRef.current = gameKey;
+    setLaunchingGameKey(gameKey);
+    return true;
+  }, []);
+
+  const releaseLaunchLock = useCallback((gameKey: string) => {
+    if (launchLockRef.current !== gameKey) return;
+    launchLockRef.current = null;
+    setLaunchingGameKey(null);
+  }, []);
 
   useEffect(() => {
     void hydrateGameMetadata(
@@ -349,22 +632,109 @@ export function MyGamesView() {
 
   useEffect(() => {
     setDemoPlaytime({ addedSeconds: 0, addedSessions: 0 });
+    setLibraryTab("all");
   }, [tourDemo.active, tourDemo.resetToken]);
+
+  // Hovering a card reveals its .exe names only while Shift is held.
+  useEffect(() => {
+    const setShiftHeld = (held: boolean) => {
+      document.body.classList.toggle("shift-held", held);
+    };
+    const syncFromKey = (event: KeyboardEvent) => setShiftHeld(event.shiftKey);
+    const clearShift = () => setShiftHeld(false);
+    window.addEventListener("keydown", syncFromKey);
+    window.addEventListener("keyup", syncFromKey);
+    window.addEventListener("blur", clearShift);
+    return () => {
+      window.removeEventListener("keydown", syncFromKey);
+      window.removeEventListener("keyup", syncFromKey);
+      window.removeEventListener("blur", clearShift);
+      clearShift();
+    };
+  }, []);
+
+  useEffect(() => {
+    const toggleControllerCardSize = () => {
+      setMyGamesCardSize(cardSize === "large" ? "grid" : "large");
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>('[data-controller-selected="true"]')
+          ?.scrollIntoView({ block: "center", inline: "nearest" });
+      });
+    };
+    window.addEventListener(
+      CONTROLLER_LIBRARY_VIEW_EVENT,
+      toggleControllerCardSize,
+    );
+    return () =>
+      window.removeEventListener(
+        CONTROLLER_LIBRARY_VIEW_EVENT,
+        toggleControllerCardSize,
+      );
+  }, [cardSize, setMyGamesCardSize]);
+
+  useEffect(() => {
+    if (tourDemo.active || !gameLaunchingEnabled) return;
+    void verifyLaunchTargetsThrottled("my-games");
+  }, [gameLaunchingEnabled, tourDemo.active]);
+
+  useEffect(() => {
+    const nowMs = Date.now();
+    const nextPromotionAt = activeSessions.reduce<number | null>(
+      (nearest, session) => {
+        const promotionAt =
+          Date.parse(session.startedAt) + LAST_PLAYED_PROMOTION_DELAY_MS;
+        if (!Number.isFinite(promotionAt) || promotionAt <= nowMs) {
+          return nearest;
+        }
+        return nearest === null ? promotionAt : Math.min(nearest, promotionAt);
+      },
+      null,
+    );
+    if (nextPromotionAt === null) return;
+
+    const timer = window.setTimeout(
+      () => setRecentSortNow(Date.now()),
+      Math.max(0, nextPromotionAt - nowMs) + 10,
+    );
+    return () => window.clearTimeout(timer);
+  }, [activeSessions, recentSortNow]);
 
   const games = useMemo(() => {
     const ignoredExeNames = new Set([...userIgnoredProcesses, ...blacklist]);
     const isIgnored = (exeName: string) =>
       matchesProcessPatternSet(exeName, ignoredExeNames);
     const metadata = matchedEntriesByGame(
-      [...exeCache.values()].filter((entry) => !isIgnored(entry.exeName)),
+      [
+        ...exeCache.values(),
+        ...[...scopedExeLinks.values()].map<ExeCacheEntry>((link) => ({
+          exeName: link.exeName,
+          state: "matched",
+          gameId: link.gameId,
+          igdbId: link.igdbId,
+          gameName: link.gameName,
+          coverUrl: link.coverUrl,
+          source: link.source,
+          identifierSource: link.identifierSource,
+          pendingCommunityGame: link.pendingCommunityGame,
+          communitySuggestionId: link.communitySuggestionId,
+          communitySuggestionVerified: link.communitySuggestionVerified,
+          communitySuggestionStatus: link.communitySuggestionStatus,
+          communitySuggestionNote: link.communitySuggestionNote,
+          shareState: link.shareState,
+          lastCheckedAt: link.setAt,
+        })),
+      ].filter((entry) => !isIgnored(entry.exeName)),
       resolveIgdbId,
     );
     const summaries = new Map<string, GameSummary>();
+    const summariesWithPlayEvidence = new Set<string>();
 
     const addAlias = (
       summary: GameSummary,
       gameId: number,
       source: GameSource | null | undefined,
+      identifierSource?: GameSource | null,
     ) => {
       const normalizedSource = source ?? null;
       if (
@@ -375,8 +745,14 @@ export function MyGamesView() {
       ) {
         summary.aliases.push({ gameId, source: normalizedSource });
       }
-      if (source && !summary.sources.includes(source)) {
-        summary.sources.push(source);
+      const badgeSource =
+        identifierSource === undefined
+          ? summary.hasExplicitIdentifierSource
+            ? null
+            : source
+          : identifierSource;
+      if (badgeSource && !summary.sources.includes(badgeSource)) {
+        summary.sources.push(badgeSource);
         summary.sources.sort(
           (left, right) => sourceRank(left) - sourceRank(right),
         );
@@ -392,7 +768,14 @@ export function MyGamesView() {
 
     const mergeEntry = (summary: GameSummary, entry: ExeCacheEntry) => {
       if (entry.gameId !== undefined) {
-        addAlias(summary, entry.gameId, entry.source);
+        if (
+          entry.identifierSource !== undefined &&
+          !summary.hasExplicitIdentifierSource
+        ) {
+          summary.sources = [];
+          summary.hasExplicitIdentifierSource = true;
+        }
+        addAlias(summary, entry.gameId, entry.source, entry.identifierSource);
       }
       summary.igdbId ??= entry.igdbId;
       if (!summary.exeNames.includes(entry.exeName)) {
@@ -439,9 +822,12 @@ export function MyGamesView() {
       sessionCount: 0,
       historyGameKey: params.historyGameKey ?? null,
       lastPlayedAt: params.lastPlayedAt,
-      exeNames: [params.exeName],
+      exeNames: params.exeName ? [params.exeName] : [],
       emulatorLabels: [],
       emulatorIds: [],
+      emulatorContentKeys: [],
+      libraryImports: [],
+      providerFloorSeconds: 0,
     });
 
     for (const session of sessions) {
@@ -537,6 +923,7 @@ export function MyGamesView() {
       if (Date.parse(endedOrStartedAt) > Date.parse(existing.lastPlayedAt)) {
         existing.lastPlayedAt = endedOrStartedAt;
       }
+      summariesWithPlayEvidence.add(summaryKey);
       if (!existing.exeNames.includes(session.exeName)) {
         existing.exeNames.push(session.exeName);
       }
@@ -555,6 +942,10 @@ export function MyGamesView() {
       if (isIgnored(activeSession.exeName)) continue;
 
       const activeSeconds = activeDurationSeconds(activeSession);
+      const promoteForRecentSort = shouldPromoteActiveGame(
+        activeSession.startedAt,
+        recentSortNow,
+      );
       const hydratedMeta =
         activeSession.source === "igdb" || activeSession.source === "community"
           ? hydratedGameMetadata.get(
@@ -586,6 +977,15 @@ export function MyGamesView() {
         gameName: activeSession.gameName,
         coverUrl: activeSession.coverUrl,
       });
+      const gameEntries = metadata.get(summaryKey) ?? [];
+      const previousLibraryTimestamp = gameEntries.reduce<string | null>(
+        (latest, entry) =>
+          latest === null ||
+          Date.parse(entry.lastCheckedAt) > Date.parse(latest)
+            ? entry.lastCheckedAt
+            : latest,
+        null,
+      );
       let existing = summaries.get(summaryKey);
 
       if (!existing) {
@@ -595,7 +995,10 @@ export function MyGamesView() {
           name: activeSession.gameName || hydratedMeta?.name || "",
           coverUrl: activeSession.coverUrl || hydratedMeta?.coverUrl || "",
           source: resolvedSource,
-          lastPlayedAt: activeSession.checkpointedAt,
+          lastPlayedAt:
+            promoteForRecentSort || previousLibraryTimestamp === null
+              ? activeSession.checkpointedAt
+              : previousLibraryTimestamp,
           exeName: activeSession.exeName,
         });
         summaries.set(summaryKey, existing);
@@ -604,17 +1007,20 @@ export function MyGamesView() {
       if (activeSession.source !== resolvedSource) {
         addAlias(existing, activeSession.gameId, resolvedSource);
       }
-      for (const entry of metadata.get(summaryKey) ?? []) {
+      for (const entry of gameEntries) {
         mergeEntry(existing, entry);
       }
       existing.sessionSeconds += activeSeconds;
-      existing.lastPlayedAt = activeSession.checkpointedAt;
-      if (
-        existing.activeStartedAt === undefined ||
-        Date.parse(activeSession.startedAt) >
-          Date.parse(existing.activeStartedAt)
-      ) {
-        existing.activeStartedAt = activeSession.startedAt;
+      if (promoteForRecentSort) {
+        existing.lastPlayedAt = activeSession.checkpointedAt;
+        summariesWithPlayEvidence.add(summaryKey);
+        if (
+          existing.activeStartedAt === undefined ||
+          Date.parse(activeSession.startedAt) >
+            Date.parse(existing.activeStartedAt)
+        ) {
+          existing.activeStartedAt = activeSession.startedAt;
+        }
       }
       existing.communitySuggestionId ??= activeSession.communitySuggestionId;
       existing.communitySuggestionVerified ??=
@@ -660,6 +1066,116 @@ export function MyGamesView() {
       }
     }
 
+    for (const entry of libraryImports.values()) {
+      const summaryKey = `igdb#${entry.igdbId}`;
+      let summary = summaries.get(summaryKey);
+      if (!summary) {
+        summary = createSummary({
+          gameId: entry.gameId,
+          igdbId: entry.igdbId,
+          name: entry.name,
+          coverUrl: entry.coverUrl,
+          source: null,
+          lastPlayedAt: entry.providerLastPlayedAt ?? entry.importedAt,
+          exeName: entry.linkedExeNames[0] ?? "",
+          historyGameKey: summaryKey,
+        });
+        summaries.set(summaryKey, summary);
+      }
+      if (entry.providerLastPlayedAt) {
+        summary.lastPlayedAt = mergeLastPlayedEvidence(
+          summary.lastPlayedAt,
+          entry.providerLastPlayedAt,
+          summariesWithPlayEvidence.has(summaryKey),
+        );
+        summariesWithPlayEvidence.add(summaryKey);
+      }
+      if (
+        !summary.aliases.some(
+          (alias) =>
+            alias.gameId === entry.gameId && alias.source === entry.source,
+        )
+      ) {
+        summary.aliases.push({ gameId: entry.gameId, source: entry.source });
+      }
+      for (const source of entry.linkedExeSources) {
+        addAlias(summary, entry.gameId, entry.source, source);
+      }
+      if (summary.source === null) {
+        summary.gameId = entry.gameId;
+        summary.source = entry.source;
+      }
+      summary.igdbId = entry.igdbId;
+      summary.name ||= entry.name;
+      summary.coverUrl ||= entry.coverUrl;
+      for (const exeName of entry.linkedExeNames) {
+        if (!summary.exeNames.includes(exeName)) summary.exeNames.push(exeName);
+      }
+      if (
+        !summary.libraryImports.some(
+          (item) =>
+            item.provider === entry.provider &&
+            item.externalId === entry.externalId,
+        )
+      ) {
+        const key = libraryEntryKey(entry.provider, entry.externalId);
+        const install = libraryInstalls.get(key);
+        summary.libraryImports.push({
+          provider: entry.provider,
+          externalId: entry.externalId,
+          installed: Boolean(install),
+          entry,
+          install,
+        });
+      }
+    }
+
+    for (const mapping of emulatorMappings.values()) {
+      if (
+        mapping.decision !== "game" ||
+        mapping.gameId === undefined ||
+        !adapterFor(mapping.emulatorId)?.launch
+      ) {
+        continue;
+      }
+      const source = mapping.source ?? null;
+      const summaryKey = resolvedCanonicalGameKey(
+        {
+          gameId: mapping.gameId,
+          source,
+          igdbId: mapping.igdbId,
+          gameName: mapping.gameName,
+          coverUrl: mapping.coverUrl,
+        },
+        resolveIgdbId,
+      );
+      let summary = summaries.get(summaryKey);
+      if (!summary) {
+        summary = createSummary({
+          gameId: mapping.gameId,
+          igdbId: mapping.igdbId,
+          name: mapping.gameName ?? mapping.display,
+          coverUrl: mapping.coverUrl ?? "",
+          source,
+          lastPlayedAt: mapping.lastSeenAt,
+          exeName: "",
+          historyGameKey: summaryKey,
+        });
+        summaries.set(summaryKey, summary);
+      }
+      addAlias(summary, mapping.gameId, source);
+      if (!summary.emulatorContentKeys.includes(mapping.contentKey)) {
+        summary.emulatorContentKeys.push(mapping.contentKey);
+      }
+      if (!summary.emulatorIds.includes(mapping.emulatorId)) {
+        summary.emulatorIds.push(mapping.emulatorId);
+      }
+      const label = `${mapping.label} · ${mapping.display}`;
+      if (!summary.emulatorLabels.includes(label)) {
+        summary.emulatorLabels.push(label);
+      }
+    }
+
     const consumedKeys = new Set<string>();
     for (const summary of summaries.values()) {
       const keys = gameSecondsKeys(summary.aliases).filter((key) => {
@@ -677,9 +1193,12 @@ export function MyGamesView() {
       );
       summary.recordedSeconds =
         summary.sessionSeconds + summary.archivedSeconds;
-      summary.totalSeconds = displayTotalSeconds(
+      const summaryKey = providerFloorKey(summary);
+      summary.providerFloorSeconds = providerFloorSeconds[summaryKey] ?? 0;
+      summary.totalSeconds = effectiveTotalSeconds(
         summary.recordedSeconds,
         summary.adjustmentSeconds,
+        summary.providerFloorSeconds,
       );
     }
 
@@ -692,29 +1211,19 @@ export function MyGamesView() {
     archivedGameSeconds,
     blacklist,
     exeCache,
+    emulatorMappings,
     hydratedGameMetadata,
+    libraryImports,
+    libraryInstalls,
     playtimeAdjustments,
+    providerFloorSeconds,
+    recentSortNow,
     resolveIgdbId,
+    scopedExeLinks,
     sessions,
     userIgnoredProcesses,
   ]);
 
-  const displayedGames = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    const filtered = needle
-      ? games.filter(
-          (game) =>
-            game.name.toLowerCase().includes(needle) ||
-            game.emulatorLabels.some((label) =>
-              label.toLowerCase().includes(needle),
-            ),
-        )
-      : games;
-
-    const sorted = [...filtered];
-    sorted.sort((left, right) => compareMyGames(left, right, sortKey));
-    return sorted;
-  }, [games, query, sortKey]);
   const demoGames = useMemo(() => {
     if (!tourDemo.active) return [];
     if (tourDemo.tourId === "core") return makeCoreTourDemoGames();
@@ -728,24 +1237,212 @@ export function MyGamesView() {
     ];
   }, [demoPlaytime, tourDemo.active, tourDemo.tourId]);
   const isCoreTourDemo = tourDemo.active && tourDemo.tourId === "core";
-  const libraryGames = isCoreTourDemo ? demoGames : [...demoGames, ...games];
-  const visibleGames = isCoreTourDemo
-    ? demoGames
-    : [...demoGames, ...displayedGames];
-
-  const demoNotice = () =>
-    addToast({
-      tone: "info",
-      title: "Tutorial game",
-      detail: "The sample exists only for this guide - nothing was saved.",
+  const allLibraryGames = isCoreTourDemo ? demoGames : [...demoGames, ...games];
+  const platform = currentPlatform();
+  const providerTabGames = useMemo(
+    () =>
+      PROVIDER_TAB_CONFIGS.map((config) => ({
+        config,
+        games: filterByLibraryTab(games, config.id),
+      })),
+    [games],
+  );
+  const providerTabInputs = useMemo(
+    () =>
+      providerTabGames.map(({ config, games: providerGames }) => ({
+        provider: config.id,
+        label: config.label,
+        importSupported:
+          config.import.kind === "builtin" &&
+          config.import.platforms.includes(platform),
+        gameCount: providerGames.length,
+      })),
+    [platform, providerTabGames],
+  );
+  const unimportedGames = useMemo(
+    () => filterByLibraryTab(games, "unimported"),
+    [games],
+  );
+  const canHideEmptyProviderTabs = hasEmptyProviderTabs(providerTabInputs);
+  const tabs = visibleLibraryTabs({
+    hideEmptyProviders: hideEmptyProviderTabs,
+    allTabCount: allLibraryGames.length,
+    unimportedGameCount: unimportedGames.length,
+    providers: providerTabInputs,
+  });
+  const activeLibraryTab = resolveLibraryTab(libraryTab, tabs);
+  const activeTabDescriptor = tabs.find((tab) => tab.id === activeLibraryTab);
+  const activeProviderConfig =
+    activeTabDescriptor?.kind === "provider"
+      ? providerTabConfig(activeTabDescriptor.id)
+      : undefined;
+  const activeImportableProviderConfig = isImportableProviderTabConfig(
+    activeProviderConfig,
+  )
+    ? activeProviderConfig
+    : undefined;
+  const tabGames = useMemo(() => {
+    if (activeLibraryTab === "all") return games;
+    if (activeLibraryTab === "unimported") return unimportedGames;
+    return (
+      providerTabGames.find((entry) => entry.config.id === activeLibraryTab)
+        ?.games ?? []
+    );
+  }, [activeLibraryTab, games, providerTabGames, unimportedGames]);
+  const activeTabKind = activeTabDescriptor?.kind ?? "all";
+  const statTabLabel =
+    activeProviderConfig?.label ??
+    (activeTabKind === "unimported" ? "LudusAtlas" : "All games");
+  const availableStatDefinitions = useMemo(
+    () => libraryStatDefinitionsForKind(activeTabKind),
+    [activeTabKind],
+  );
+  const statCards = useMemo(() => {
+    if (!showStatCards || statCardIds.length === 0) return [];
+    const metrics = summarizeLibraryStats(tabGames, {
+      provider: activeProviderConfig?.id,
+      providerFloorSeconds: activeProviderConfig
+        ? providerFloorRecord(
+            providerFloorsForProvider(
+              libraryImports.values(),
+              activeProviderConfig.id,
+            ),
+          )
+        : undefined,
+      nowMs: recentSortNow,
     });
+    return libraryStatCards(statCardIds, metrics, {
+      kind: activeTabKind,
+      providerLabel: activeProviderConfig?.label,
+    });
+  }, [
+    activeProviderConfig,
+    activeTabKind,
+    libraryImports,
+    recentSortNow,
+    showStatCards,
+    statCardIds,
+    tabGames,
+  ]);
+  const displayedGames = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const filtered = needle
+      ? tabGames.filter(
+          (game) =>
+            game.name.toLowerCase().includes(needle) ||
+            game.emulatorLabels.some((label) =>
+              label.toLowerCase().includes(needle),
+            ),
+        )
+      : tabGames;
+
+    const sorted = [...filtered];
+    sorted.sort((left, right) => compareMyGames(left, right, sortKey));
+    return sorted;
+  }, [query, sortKey, tabGames]);
+  const demoForTab = activeLibraryTab === "all" ? demoGames : [];
+  const libraryGames =
+    isCoreTourDemo && activeLibraryTab === "all"
+      ? demoGames
+      : [...demoForTab, ...tabGames];
+  const visibleGames =
+    isCoreTourDemo && activeLibraryTab === "all"
+      ? demoGames
+      : [...demoForTab, ...displayedGames];
+  const layout = myGamesLayout({
+    libraryGameCount: allLibraryGames.length,
+    tabs,
+    requestedTab: libraryTab,
+    activeTabGameCount: libraryGames.length,
+    visibleGameCount: visibleGames.length,
+    importSupported: importableProviderTabs(platform).length > 0,
+  });
+  const renderWindowKey = `${activeLibraryTab}\u0000${query}\u0000${sortKey}\u0000${view}`;
+  const [renderWindow, setRenderWindow] = useState(() => ({
+    key: renderWindowKey,
+    limit: INITIAL_LIBRARY_RENDER_COUNT,
+  }));
+  const visibleGameLimit =
+    renderWindow.key === renderWindowKey
+      ? renderWindow.limit
+      : INITIAL_LIBRARY_RENDER_COUNT;
+  const renderedGames = visibleGames.slice(0, visibleGameLimit);
+
+  useEffect(() => {
+    if (renderWindow.key !== renderWindowKey) {
+      setRenderWindow({
+        key: renderWindowKey,
+        limit: INITIAL_LIBRARY_RENDER_COUNT,
+      });
+      return;
+    }
+    if (renderWindow.limit >= visibleGames.length) return;
+
+    const advance = () =>
+      setRenderWindow((current) => {
+        if (current.key !== renderWindowKey) return current;
+        return {
+          key: current.key,
+          limit: nextLibraryRenderLimit(current.limit, visibleGames.length),
+        };
+      });
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (
+        callback: () => void,
+        options?: { timeout: number },
+      ) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(advance, { timeout: 250 });
+      return () => idleWindow.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(advance, 16);
+    return () => window.clearTimeout(handle);
+  }, [renderWindow, renderWindowKey, visibleGames.length]);
+
+  const demoNotice = useCallback(
+    () =>
+      addToast({
+        tone: "info",
+        title: "Tutorial game",
+        detail: "The sample exists only for this guide - nothing was saved.",
+      }),
+    [addToast],
+  );
+  const requestRemoval = useCallback(
+    (game: GameSummary) => {
+      if (isTourDemoLibraryGame(game)) {
+        demoNotice();
+        return;
+      }
+      setPendingRemoval({
+        gameId: game.gameId,
+        source: game.source,
+        name: game.name,
+        aliases: game.aliases,
+        libraryImports: game.libraryImports,
+      });
+    },
+    [demoNotice],
+  );
+  const requestStopTracking = useCallback((game: GameSummary) => {
+    if (!game.source || isTourDemoLibraryGame(game)) return;
+    setPendingStopTracking({
+      gameId: game.gameId,
+      source: game.source,
+      name: game.name,
+      exeNames: game.exeNames,
+      emulatorLabels: game.emulatorLabels,
+      sessionCount: game.sessionCount,
+      aliases: game.aliases,
+    });
+  }, []);
 
   return (
     <div className="grid gap-5">
-      {libraryGames.length === 0 ? (
-        <Panel className="px-4 py-12 text-center text-sm text-text-muted">
-          No discovered games have completed a session yet.
-        </Panel>
+      {layout.panel === "empty-library" ? (
+        <EmptyLibraryPanel platform={platform} />
       ) : (
         <>
           <Panel dataTour="games-toolbar" className="overflow-hidden">
@@ -753,38 +1450,332 @@ export function MyGamesView() {
               <div>
                 <h2 className="font-semibold text-text">Library</h2>
                 <p className="mt-1 text-sm text-text-muted">
-                  {visibleGames.length} of {libraryGames.length} tracked games
+                  {visibleGames.length} of {libraryGames.length} tracked{" "}
+                  {activeProviderConfig
+                    ? `${activeProviderConfig.label} games`
+                    : "games"}
                 </p>
               </div>
-              <div className="flex items-center gap-1 rounded-md border border-border bg-bg p-1">
-                <button
-                  type="button"
-                  aria-label="Grid view"
-                  onClick={() => setView("grid")}
-                  className={clsx(
-                    "grid h-8 w-8 place-items-center rounded transition",
-                    view === "grid"
-                      ? "bg-accent text-accent-fg"
-                      : "text-text-muted hover:bg-surface-hover hover:text-text",
-                  )}
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <div className="flex items-center gap-1 rounded-md border border-border bg-bg p-1">
+                  <button
+                    type="button"
+                    aria-label="Grid view"
+                    title="Standard cards"
+                    onClick={() => setMyGamesCardSize("grid")}
+                    className={clsx(
+                      "grid h-8 w-8 place-items-center rounded transition",
+                      view === "grid"
+                        ? "bg-accent text-accent-fg"
+                        : "text-text-muted hover:bg-surface-hover hover:text-text",
+                    )}
+                  >
+                    <LayoutGrid size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Large card view"
+                    title="Large cards"
+                    onClick={() => setMyGamesCardSize("large")}
+                    className={clsx(
+                      "grid h-8 w-8 place-items-center rounded transition",
+                      view === "large"
+                        ? "bg-accent text-accent-fg"
+                        : "text-text-muted hover:bg-surface-hover hover:text-text",
+                    )}
+                  >
+                    <Grid2X2 size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="List view"
+                    title="List"
+                    onClick={() => setMyGamesCardSize("list")}
+                    className={clsx(
+                      "grid h-8 w-8 place-items-center rounded transition",
+                      view === "list"
+                        ? "bg-accent text-accent-fg"
+                        : "text-text-muted hover:bg-surface-hover hover:text-text",
+                    )}
+                  >
+                    <List size={15} />
+                  </button>
+                </div>
+                <Button
+                  variant="secondary"
+                  icon={SlidersHorizontal}
+                  aria-label="Customize library view"
+                  aria-expanded={customizeOpen}
+                  aria-controls="library-customize"
+                  data-controller-item="library-customize"
+                  onClick={() => setCustomizeOpen((open) => !open)}
                 >
-                  <LayoutGrid size={15} />
-                </button>
-                <button
-                  type="button"
-                  aria-label="List view"
-                  onClick={() => setView("list")}
-                  className={clsx(
-                    "grid h-8 w-8 place-items-center rounded transition",
-                    view === "list"
-                      ? "bg-accent text-accent-fg"
-                      : "text-text-muted hover:bg-surface-hover hover:text-text",
-                  )}
-                >
-                  <List size={15} />
-                </button>
+                  Customize
+                </Button>
               </div>
             </div>
+
+            {customizeOpen ? (
+              <div
+                id="library-customize"
+                className="divide-y divide-border border-b border-border bg-bg px-4"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div>
+                    <label
+                      htmlFor="library-show-origin"
+                      className="text-sm font-medium text-text"
+                    >
+                      Show where games came from
+                    </label>
+                    <p
+                      id="library-show-origin-help"
+                      className="mt-1 text-xs leading-5 text-text-faint"
+                    >
+                      The Steam, Xbox, emulator or LudusAtlas mark beside each
+                      game name.
+                    </p>
+                  </div>
+                  <input
+                    id="library-show-origin"
+                    type="checkbox"
+                    checked={showOrigin}
+                    aria-describedby="library-show-origin-help"
+                    data-controller-item="library-option"
+                    onChange={(event) =>
+                      setMyGamesShowOriginBadges(event.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-border accent-accent"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div>
+                    <label
+                      htmlFor="library-show-match"
+                      className="text-sm font-medium text-text"
+                    >
+                      Show how files were matched
+                    </label>
+                    <p
+                      id="library-show-match-help"
+                      className="mt-1 text-xs leading-5 text-text-faint"
+                    >
+                      The IGDB, Community or Custom seal in the cover corner.
+                      Warnings and actions always stay.
+                    </p>
+                  </div>
+                  <input
+                    id="library-show-match"
+                    type="checkbox"
+                    checked={showMatch}
+                    aria-describedby="library-show-match-help"
+                    data-controller-item="library-option"
+                    onChange={(event) =>
+                      setMyGamesShowMatchBadges(event.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-border accent-accent"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div>
+                    <label
+                      htmlFor="library-high-res-covers"
+                      className="text-sm font-medium text-text"
+                    >
+                      Sharper covers
+                    </label>
+                    <p
+                      id="library-high-res-covers-help"
+                      className="mt-1 text-xs leading-5 text-text-faint"
+                    >
+                      Load cover art at a larger size. Looks better on big
+                      cards, uses more data. Covers you set yourself are
+                      unaffected.
+                    </p>
+                  </div>
+                  <input
+                    id="library-high-res-covers"
+                    type="checkbox"
+                    checked={highResCovers}
+                    aria-describedby="library-high-res-covers-help"
+                    data-controller-item="library-option"
+                    onChange={(event) =>
+                      setMyGamesHighResCovers(event.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-border accent-accent"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div>
+                    <label
+                      htmlFor="library-hide-empty-tabs"
+                      className={clsx(
+                        "text-sm font-medium",
+                        canHideEmptyProviderTabs
+                          ? "text-text"
+                          : "text-text-faint",
+                      )}
+                    >
+                      Hide empty library tabs
+                    </label>
+                    <p
+                      id="library-hide-empty-tabs-help"
+                      className="mt-1 text-xs leading-5 text-text-faint"
+                    >
+                      {canHideEmptyProviderTabs
+                        ? "A Steam or Xbox tab with nothing imported disappears, along with its import button. The tab row goes away entirely once no library tab is left. Turn this off again to import later."
+                        : "Every library tab has games in it, so there is nothing to hide."}
+                    </p>
+                  </div>
+                  <input
+                    id="library-hide-empty-tabs"
+                    type="checkbox"
+                    checked={hideEmptyProviderTabs}
+                    disabled={!canHideEmptyProviderTabs}
+                    aria-describedby="library-hide-empty-tabs-help"
+                    data-controller-item="library-option"
+                    onChange={(event) =>
+                      setMyGamesHideEmptyProviderTabs(event.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-border accent-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div>
+                    <label
+                      htmlFor="library-show-stats"
+                      className="text-sm font-medium text-text"
+                    >
+                      Show the summary row
+                    </label>
+                    <p
+                      id="library-show-stats-help"
+                      className="mt-1 text-xs leading-5 text-text-faint"
+                    >
+                      The number cards above your games.
+                    </p>
+                  </div>
+                  <input
+                    id="library-show-stats"
+                    type="checkbox"
+                    checked={showStatCards}
+                    aria-describedby="library-show-stats-help"
+                    data-controller-item="library-option"
+                    onChange={(event) =>
+                      setMyGamesShowStatCards(event.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-border accent-accent"
+                  />
+                </div>
+                {showStatCards ? (
+                  <fieldset className="py-3">
+                    <legend className="text-sm font-medium text-text">
+                      Numbers on the {statTabLabel} tab
+                    </legend>
+                    <p className="mt-1 text-xs leading-5 text-text-faint">
+                      Pick which numbers to show. A tab only offers the ones
+                      that mean something there.
+                    </p>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      {availableStatDefinitions.map((definition) => {
+                        const checked = statCardIds.includes(definition.id);
+                        return (
+                          <label
+                            key={definition.id}
+                            className="flex items-start gap-2.5 rounded-md px-2 py-1.5 transition hover:bg-surface-hover"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              data-controller-item="library-option"
+                              onChange={(event) =>
+                                setMyGamesStatCards(
+                                  toggleLibraryStatCardIds(
+                                    statCardIds,
+                                    definition.id,
+                                    event.target.checked,
+                                  ),
+                                )
+                              }
+                              className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-accent"
+                            />
+                            <span className="min-w-0">
+                              <span className="block text-sm text-text">
+                                {definition.label({
+                                  kind: activeTabKind,
+                                  providerLabel: activeProviderConfig?.label,
+                                })}
+                              </span>
+                              <span className="block text-xs leading-5 text-text-faint">
+                                {definition.help}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </fieldset>
+                ) : null}
+              </div>
+            ) : null}
+
+            {layout.showTabs ? (
+              <div className="border-b border-border bg-bg px-4 pt-3">
+                <div
+                  role="tablist"
+                  aria-label="Game library source"
+                  className="-mb-px flex gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:thin]"
+                >
+                  {tabs.map((tab) => {
+                    const selected = activeLibraryTab === tab.id;
+                    const config =
+                      tab.kind === "provider"
+                        ? providerTabConfig(tab.id)
+                        : undefined;
+                    const tabIconUrl =
+                      tab.kind === "unimported" ? "/icon.png" : config?.iconUrl;
+                    return (
+                      <button
+                        key={tab.id}
+                        id={`library-tab-${tab.id}`}
+                        type="button"
+                        role="tab"
+                        aria-selected={selected}
+                        aria-controls="library-tabpanel"
+                        data-controller-item="library-tab"
+                        onClick={() => setLibraryTab(tab.id)}
+                        className={clsx(
+                          "library-tab flex shrink-0 items-center gap-2 rounded-t-lg border-b-2 px-3 pb-2.5 pt-2.5 text-sm font-medium transition",
+                          selected
+                            ? "border-accent text-text"
+                            : "border-transparent text-text-muted hover:border-border-strong hover:text-text",
+                        )}
+                      >
+                        {tabIconUrl ? (
+                          <img
+                            src={tabIconUrl}
+                            alt=""
+                            aria-hidden="true"
+                            className="h-4 w-4 shrink-0"
+                          />
+                        ) : null}
+                        <span>{tab.label}</span>
+                        <span
+                          className={clsx(
+                            "rounded-full px-1.5 py-0.5 font-mono text-[11px]",
+                            selected
+                              ? "bg-accent/15 text-accent"
+                              : "bg-surface text-text-faint",
+                          )}
+                        >
+                          {tab.count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
 
             <div className="grid gap-2 border-b border-border bg-bg px-4 py-3 lg:grid-cols-[minmax(220px,1fr)_220px]">
               <div className="relative min-w-0">
@@ -802,7 +1793,9 @@ export function MyGamesView() {
               <select
                 aria-label="Sort games"
                 value={sortKey}
-                onChange={(event) => setSortKey(event.target.value as SortKey)}
+                onChange={(event) =>
+                  setMyGamesSortKey(event.target.value as MyGamesSortKey)
+                }
                 className="min-w-0 rounded-md border border-border bg-surface px-3 py-2 text-sm text-text outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/30"
               >
                 {sortOptions.map((option) => (
@@ -814,76 +1807,165 @@ export function MyGamesView() {
             </div>
           </Panel>
 
-          {visibleGames.length === 0 ? (
-            <Panel className="px-4 py-12 text-center text-sm text-text-muted">
-              No games match &ldquo;{query}&rdquo;.
-            </Panel>
-          ) : (
-            <div
-              data-tour={isCoreTourDemo ? "core-library-demo" : undefined}
-              className={
-                view === "grid"
-                  ? "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-[repeat(auto-fill,minmax(216px,1fr))]"
-                  : "grid gap-3"
-              }
-            >
-              {visibleGames.map((game) => {
-                const isDemo = isTourDemoLibraryGame(game);
-                return (
-                  <GameLibraryCard
-                    key={
-                      isDemo
-                        ? `tour-demo-${game.gameId}-${tourDemo.resetToken}`
-                        : game.igdbId !== undefined
-                          ? `igdb#${game.igdbId}`
-                          : `${game.source ?? "unknown"}:${game.gameId}`
-                    }
-                    game={game}
-                    demo={isDemo}
-                    onDemoPlaytimeLogged={
-                      isDemo && tourDemo.tourId === "log-playtime"
-                        ? (durationSeconds) =>
-                            setDemoPlaytime((current) => ({
-                              addedSeconds:
-                                current.addedSeconds + durationSeconds,
-                              addedSessions: current.addedSessions + 1,
-                            }))
-                        : undefined
-                    }
-                    showDurationDays={showDurationDays}
-                    view={view}
-                    onRemove={
-                      isDemo
-                        ? demoNotice
-                        : () =>
-                            setPendingRemoval({
-                              gameId: game.gameId,
-                              source: game.source,
-                              name: game.name,
-                              aliases: game.aliases,
-                            })
-                    }
-                    onStopTracking={
-                      isDemo
-                        ? undefined
-                        : game.source
-                          ? () =>
-                              setPendingStopTracking({
-                                gameId: game.gameId,
-                                source: game.source!,
-                                name: game.name,
-                                exeNames: game.exeNames,
-                                emulatorLabels: game.emulatorLabels,
-                                sessionCount: game.sessionCount,
-                                aliases: game.aliases,
-                              })
-                          : undefined
-                    }
-                  />
-                );
-              })}
-            </div>
-          )}
+          <div
+            id="library-tabpanel"
+            role={layout.showTabs ? "tabpanel" : undefined}
+            aria-labelledby={
+              layout.showTabs ? `library-tab-${activeLibraryTab}` : undefined
+            }
+            className="grid gap-5"
+          >
+            <p className="sr-only" aria-live="polite">
+              {layout.panel === "provider-empty" && activeProviderConfig
+                ? `No ${activeProviderConfig.label} games imported yet. Use Import from ${activeProviderConfig.label} to add them.`
+                : layout.panel === "unimported-empty"
+                  ? "No games outside your imported libraries yet."
+                  : `Showing ${visibleGames.length} ${activeProviderConfig ? `${activeProviderConfig.label} games` : "games"}.`}
+            </p>
+
+            {activeProviderConfig && layout.panel !== "provider-empty" ? (
+              <div className="grid gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-semibold text-text">
+                      {activeProviderConfig.headline}
+                    </h3>
+                    <p className="text-sm text-text-muted">
+                      {activeProviderConfig.subtitle}
+                    </p>
+                  </div>
+                  {activeImportableProviderConfig?.import.platforms.includes(
+                    platform,
+                  ) ? (
+                    <Button
+                      variant="secondary"
+                      icon={Download}
+                      data-controller-item="view-link"
+                      onClick={() => {
+                        setLibraryImportProvider(
+                          activeImportableProviderConfig.id,
+                        );
+                        setActiveView("import");
+                      }}
+                    >
+                      {activeProviderConfig.importCtaLabel}
+                    </Button>
+                  ) : null}
+                </div>
+                <LibraryStatRow
+                  cards={statCards}
+                  showDurationDays={showDurationDays}
+                />
+              </div>
+            ) : null}
+
+            {activeTabKind === "unimported" &&
+            layout.panel !== "unimported-empty" ? (
+              <div className="grid gap-3">
+                <div>
+                  <h3 className="font-semibold text-text">LudusAtlas</h3>
+                  <p className="text-sm text-text-muted">
+                    Everything that LudusAtlas found and tracked for you.
+                  </p>
+                </div>
+                <LibraryStatRow
+                  cards={statCards}
+                  showDurationDays={showDurationDays}
+                />
+              </div>
+            ) : null}
+
+            {activeTabKind === "all" && layout.panel === "games" ? (
+              <LibraryStatRow
+                cards={statCards}
+                showDurationDays={showDurationDays}
+              />
+            ) : null}
+
+            {layout.panel === "provider-empty" &&
+            activeImportableProviderConfig ? (
+              <ProviderImportCallout
+                config={activeImportableProviderConfig}
+                variant="provider-tab"
+              />
+            ) : layout.panel === "unimported-empty" ? (
+              <Panel className="px-6 py-12 text-center">
+                <h3 className="text-lg font-semibold text-text">
+                  Everything here came from an import
+                </h3>
+                <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-text-muted">
+                  Games LudusAtlas finds on its own show up here: a disc
+                  install, a game file you started yourself, an emulator, or
+                  anything you added by hand.
+                </p>
+              </Panel>
+            ) : layout.panel === "no-search-results" ? (
+              <Panel className="px-4 py-12 text-center text-sm text-text-muted">
+                No games match &ldquo;{query}&rdquo;.
+              </Panel>
+            ) : (
+              <>
+                <div
+                  data-tour={isCoreTourDemo ? "core-library-demo" : undefined}
+                  className={clsx(
+                    "grid",
+                    view === "grid" &&
+                      "grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-[repeat(auto-fill,minmax(216px,1fr))]",
+                    view === "large" &&
+                      "grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]",
+                    view === "list" && "gap-3",
+                  )}
+                >
+                  {renderedGames.map((game) => {
+                    const isDemo = isTourDemoLibraryGame(game);
+                    const cardKey = isDemo
+                      ? `tour-demo-${game.gameId}-${tourDemo.resetToken}`
+                      : game.igdbId !== undefined
+                        ? `igdb#${game.igdbId}`
+                        : `${game.source ?? "unknown"}:${game.gameId}`;
+                    return (
+                      <MemoizedGameLibraryCard
+                        key={cardKey}
+                        launchKey={cardKey}
+                        launchBlocked={launchingGameKey !== null}
+                        onAcquireLaunch={acquireLaunchLock}
+                        onReleaseLaunch={releaseLaunchLock}
+                        game={game}
+                        localLinks={localLinks}
+                        demo={isDemo}
+                        onDemoPlaytimeLogged={
+                          isDemo && tourDemo.tourId === "log-playtime"
+                            ? (durationSeconds) =>
+                                setDemoPlaytime((current) => ({
+                                  addedSeconds:
+                                    current.addedSeconds + durationSeconds,
+                                  addedSessions: current.addedSessions + 1,
+                                }))
+                            : undefined
+                        }
+                        showDurationDays={showDurationDays}
+                        showOrigin={showOrigin}
+                        showMatch={showMatch}
+                        view={view}
+                        onRemove={requestRemoval}
+                        onStopTracking={
+                          !isDemo && game.source
+                            ? requestStopTracking
+                            : undefined
+                        }
+                      />
+                    );
+                  })}
+                </div>
+                {renderedGames.length < visibleGames.length ? (
+                  <div className="flex items-center justify-center gap-2 py-2 text-xs text-text-faint">
+                    <Loader2 size={14} className="animate-spin" />
+                    Preparing the rest of your library…
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
         </>
       )}
       {pendingRemoval ? (
@@ -891,6 +1973,9 @@ export function MyGamesView() {
           game={pendingRemoval}
           onCancel={() => setPendingRemoval(null)}
           onConfirm={(removeHistory) => {
+            for (const entry of pendingRemoval.libraryImports) {
+              removeLibraryImport(entry.provider, entry.externalId);
+            }
             untrackGame(
               pendingRemoval.gameId,
               pendingRemoval.source,
@@ -949,9 +2034,131 @@ export function MyGamesView() {
   );
 }
 
+function EmptyLibraryPanel({
+  platform,
+}: {
+  platform: ReturnType<typeof currentPlatform>;
+}) {
+  const importProviders = importableProviderTabs(platform);
+  if (importProviders.length === 0) {
+    return (
+      <Panel className="px-4 py-12 text-center text-sm text-text-muted">
+        No discovered games have completed a session yet.
+      </Panel>
+    );
+  }
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {importProviders.map((config) => (
+        <ProviderImportCallout
+          key={config.id}
+          config={config}
+          variant="first-import"
+        />
+      ))}
+    </div>
+  );
+}
+
+function ProviderImportCallout({
+  config,
+  variant,
+}: {
+  config: ImportableProviderTabConfig;
+  variant: "first-import" | "provider-tab";
+}) {
+  const setActiveView = useAppStore((state) => state.setActiveView);
+  const setLibraryImportProvider = useAppStore(
+    (state) => state.setLibraryImportProvider,
+  );
+
+  return (
+    <Panel className="px-6 py-12 text-center">
+      {config.iconUrl ? (
+        <img
+          src={config.iconUrl}
+          alt=""
+          aria-hidden="true"
+          className="mx-auto h-10 w-10"
+        />
+      ) : null}
+      <h3 className="mt-4 text-lg font-semibold text-text">
+        {variant === "first-import"
+          ? config.firstImportTitle
+          : config.emptyTitle}
+      </h3>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-text-muted">
+        {variant === "first-import" ? config.firstImportBody : config.emptyBody}
+      </p>
+      <Button
+        variant="primary"
+        icon={Download}
+        className="mx-auto mt-6"
+        data-controller-item="view-link"
+        onClick={() => {
+          setLibraryImportProvider(config.id);
+          setActiveView("import");
+        }}
+      >
+        {config.firstImportCtaLabel}
+      </Button>
+    </Panel>
+  );
+}
+
+function LaunchStartingOverlay({
+  gameName,
+  detected,
+  compact = false,
+}: {
+  gameName: string;
+  detected: boolean;
+  compact?: boolean;
+}) {
+  // Game cards isolate their stacking contexts so this local overlay cannot
+  // paint over context menus portalled to document.body.
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="absolute inset-0 z-[70] flex items-center justify-center rounded-xl bg-bg/85 p-4 backdrop-blur-sm"
+    >
+      <div
+        className={clsx(
+          "flex items-center rounded-xl border border-accent/50 bg-surface/95 text-center shadow-raised",
+          compact ? "gap-3 px-4 py-2.5" : "flex-col gap-3 px-6 py-5",
+        )}
+      >
+        <Loader2
+          size={compact ? 20 : 30}
+          className="shrink-0 animate-spin text-accent"
+        />
+        <div className={compact ? "text-left" : undefined}>
+          <div className="max-w-64 truncate text-sm font-bold text-text">
+            Starting {gameName}…
+          </div>
+          <div className="mt-1 text-xs text-text-muted">
+            {detected
+              ? "Game detected · finishing startup"
+              : "Waiting for Windows to open the game"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GameLibraryCard({
   game,
+  localLinks,
+  launchKey,
+  launchBlocked,
+  onAcquireLaunch,
+  onReleaseLaunch,
   showDurationDays,
+  showOrigin,
+  showMatch,
   view,
   onRemove,
   onStopTracking,
@@ -959,28 +2166,45 @@ function GameLibraryCard({
   demo = false,
 }: {
   game: GameSummary;
+  localLinks: readonly LocalLink[];
+  launchKey: string;
+  launchBlocked: boolean;
+  onAcquireLaunch: (gameKey: string) => boolean;
+  onReleaseLaunch: (gameKey: string) => void;
   showDurationDays: boolean;
+  showOrigin: boolean;
+  showMatch: boolean;
   view: ViewMode;
-  onRemove: () => void;
-  onStopTracking?: () => void;
+  onRemove: (game: GameSummary) => void;
+  onStopTracking?: (game: GameSummary) => void;
   onDemoPlaytimeLogged?: (durationSeconds: number) => void;
   demo?: boolean;
 }) {
+  // The tour walks through both halves, so its demo card always shows them.
+  const originVisible = demo || showOrigin;
+  const matchVisible = demo || showMatch;
   const averageSeconds = Math.round(
     game.sessionSeconds / Math.max(1, game.sessionCount),
   );
   const isList = view === "list";
+  const isLarge = view === "large";
   const addToast = useAppStore((state) => state.addToast);
   const setActiveView = useAppStore((state) => state.setActiveView);
   const setHistoryQuery = useAppStore((state) => state.setHistoryQuery);
   const setHistoryGameKey = useAppStore((state) => state.setHistoryGameKey);
+  const removeLibraryInstall = useAppStore(
+    (state) => state.removeLibraryInstall,
+  );
   const showDemoContextMenu = useAppStore(
     (state) =>
       (state.activeTour?.tourId === "log-playtime" &&
         state.activeTour.stepIndex === 5) ||
       (state.activeTour?.tourId === "game-actions" &&
-        state.activeTour.stepIndex >= 2),
+        state.activeTour.stepIndex >= 2) ||
+      (state.activeTour?.tourId === "launch-games" &&
+        state.activeTour.stepIndex === 3),
   );
+  const activeTour = useAppStore((state) => state.activeTour);
   const contextMenu = useContextMenu();
   const cardRef = useRef<HTMLElement | null>(null);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
@@ -988,27 +2212,20 @@ function GameLibraryCard({
   const [showAddPlaytime, setShowAddPlaytime] = useState(false);
   const [showAdjustPlaytime, setShowAdjustPlaytime] = useState(false);
   const [showMatchCheck, setShowMatchCheck] = useState(false);
+  const libraryMatchOffers = useLibraryMatchOffers((state) => state.offers);
+  const [showDetails, setShowDetails] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  const [cancelSuggestionTarget, setCancelSuggestionTarget] =
+    useState<PendingCommunitySuggestionTarget | null>(null);
   const apiEndpoint = useAppStore((state) => state.settings.apiEndpoint);
-  const installUuid = useAppStore((state) => state.installUuid);
+  const ignoredProcesses = useAppStore((state) => state.ignoredProcesses);
   const isOffline = useIsOffline();
   const [shareOpen, setShareOpen] = useState(false);
-  const [shareSearch, setShareSearch] = useState("");
-  const [shareCandidates, setShareCandidates] = useState<
-    CommunityMetadataCandidate[]
-  >([]);
-  const [shareHasMore, setShareHasMore] = useState(false);
-  const [shareNextOffset, setShareNextOffset] = useState(0);
-  const [shareSelection, setShareSelection] =
-    useState<CommunityMetadataCandidate | null>(null);
-  const [shareState, setShareState] = useState<
-    "idle" | "loading" | "loading-more" | "saving" | "saved" | "error"
-  >("idle");
-  const [shareMessage, setShareMessage] = useState("");
   const [showConvert, setShowConvert] = useState(false);
   const [convertName, setConvertName] = useState("");
   const [showRename, setShowRename] = useState(false);
   const [renameName, setRenameName] = useState("");
+  const [launching, setLaunching] = useState(false);
 
   useEffect(() => {
     if (!demo) return;
@@ -1035,25 +2252,295 @@ function GameLibraryCard({
       ),
     ),
   );
+  useEffect(() => {
+    if (!launching || hasActiveSession) return;
+    const timeout = window.setTimeout(() => {
+      setLaunching(false);
+      onReleaseLaunch(launchKey);
+      addToast({
+        tone: "info",
+        title: "Launch request sent",
+        detail: `${game.name} has not appeared in LudusAtlas yet. It may still be starting or waiting on its own launcher.`,
+      });
+    }, 8_000);
+    return () => window.clearTimeout(timeout);
+  }, [
+    addToast,
+    game.name,
+    hasActiveSession,
+    launchKey,
+    launching,
+    onReleaseLaunch,
+  ]);
+  useEffect(() => {
+    if (!launching || !hasActiveSession) return;
+    const timeout = window.setTimeout(() => {
+      setLaunching(false);
+      onReleaseLaunch(launchKey);
+    }, 10_000);
+    return () => window.clearTimeout(timeout);
+  }, [hasActiveSession, launchKey, launching, onReleaseLaunch]);
+  useEffect(
+    () => () => onReleaseLaunch(launchKey),
+    [launchKey, onReleaseLaunch],
+  );
+  const launchTargets = useAppStore((state) => state.launchTargets);
+  const manualLaunchTargets = useAppStore((state) => state.manualLaunchTargets);
+  const emulatorMappings = useAppStore((state) => state.emulatorMappings);
+  const emulatorAutoLaunchTargets = useAppStore(
+    (state) => state.emulatorAutoLaunchTargets,
+  );
+  const emulatorManualLaunchTargets = useAppStore(
+    (state) => state.emulatorManualLaunchTargets,
+  );
+  const emulatorLaunchCandidates = useAppStore(
+    (state) => state.emulatorLaunchCandidates,
+  );
+  const exeCache = useAppStore((state) => state.exeCache);
+  const scopedExeLinks = useAppStore((state) => state.scopedExeLinks);
+  const launcherEnabled = useAppStore(
+    (state) => state.settings.gameLaunchingEnabled === true,
+  );
+  const isWindows = currentPlatform() === "windows";
+  const canLaunchExecutables = isWindows && launcherEnabled;
+  const launchTourDemo = demo && activeTour?.tourId === "launch-games";
+  const canConfigureLaunch =
+    canLaunchExecutables &&
+    game.exeNames.some((exeName) => /\.exe$/i.test(exeName));
+  const manualTarget = useMemo(
+    () => findManualLaunchTarget(game.aliases, manualLaunchTargets),
+    [game.aliases, manualLaunchTargets],
+  );
+  const autoLaunchTargets = useMemo(
+    () =>
+      launchTargetsForGame({
+        exeNames: game.exeNames,
+        aliases: game.aliases,
+        launchTargets,
+        exeCache,
+      }),
+    [exeCache, game.aliases, game.exeNames, launchTargets],
+  );
+  const ownedLaunchTargets = useMemo(() => {
+    if (!manualTarget) return autoLaunchTargets;
+    const manualKey = manualTarget.exeName.toLowerCase();
+    return [
+      manualTarget,
+      ...autoLaunchTargets.filter(
+        (target) => target.exeName.toLowerCase() !== manualKey,
+      ),
+    ];
+  }, [autoLaunchTargets, manualTarget]);
+  const primaryLaunchTarget = ownedLaunchTargets[0];
+  const steamImportEntry = game.libraryImports.find(
+    (entry) => entry.provider === "steam",
+  );
+  const steamLaunchEntry = game.libraryImports.find(
+    (entry) => entry.provider === "steam" && entry.installed,
+  );
+  const xboxImportEntry = game.libraryImports.find(
+    (entry) => entry.provider === "xbox",
+  );
+  const xboxLaunchEntry = game.libraryImports.find(
+    (entry) => entry.provider === "xbox" && entry.installed,
+  );
+  const importedProviders = libraryProviders(game.libraryImports);
+  const unknownDurationProviders = importedProviders.filter((provider) =>
+    hasUnknownProviderPlaytime(game.libraryImports, provider),
+  );
+  const communityApproval = communitySuggestionApproval({
+    suggestionId: game.communitySuggestionId,
+    verified: game.communitySuggestionVerified,
+    status: game.communitySuggestionStatus,
+  });
+  const steamActions = libraryContextActions({
+    demo,
+    isWindows,
+    launcherEnabled,
+    hasImport: Boolean(steamImportEntry),
+    installed: Boolean(steamLaunchEntry),
+  });
+  const xboxActions = libraryContextActions({
+    demo,
+    isWindows,
+    launcherEnabled,
+    hasImport: Boolean(xboxImportEntry),
+    installed: Boolean(xboxLaunchEntry),
+  });
+  const gameEmulatorMappings = useMemo(
+    () =>
+      game.emulatorContentKeys.flatMap((contentKey) => {
+        const mapping = emulatorMappings.get(contentKey);
+        return mapping?.decision === "game" &&
+          adapterFor(mapping.emulatorId)?.launch
+          ? [mapping]
+          : [];
+      }),
+    [emulatorMappings, game.emulatorContentKeys],
+  );
+  const primaryEmulatorMapping =
+    gameEmulatorMappings.length === 1 ? gameEmulatorMappings[0] : undefined;
+  const primaryEmulatorTarget = primaryEmulatorMapping
+    ? resolveEmulatorLaunchTarget(
+        primaryEmulatorMapping.contentKey,
+        emulatorAutoLaunchTargets,
+        emulatorManualLaunchTargets,
+      )
+    : undefined;
+  const primaryEmulatorCandidate = primaryEmulatorMapping
+    ? emulatorLaunchCandidates.get(primaryEmulatorMapping.contentKey)
+    : undefined;
+  const showPlayButton =
+    launchTourDemo ||
+    (!demo &&
+      canLaunchExecutables &&
+      Boolean(
+        primaryLaunchTarget ||
+        primaryEmulatorTarget ||
+        steamLaunchEntry ||
+        xboxLaunchEntry,
+      ));
+  const showLaunchFooter =
+    showPlayButton ||
+    (!demo &&
+      canLaunchExecutables &&
+      (canConfigureLaunch || gameEmulatorMappings.length > 0));
+  const showLaunchNote = !showLaunchFooter && !demo && canLaunchExecutables;
+  const basePlayState = playButtonState(
+    game.name,
+    launching,
+    hasActiveSession,
+    launchBlocked,
+  );
+  const playState =
+    xboxLaunchEntry && !manualTarget
+      ? {
+          ...basePlayState,
+          ariaLabel: `Play ${game.name} on Xbox`,
+          title: "Play on Xbox",
+        }
+      : steamLaunchEntry && !primaryLaunchTarget && !primaryEmulatorTarget
+        ? {
+            ...basePlayState,
+            ariaLabel: `Play ${game.name} in Steam`,
+            title: "Play in Steam",
+          }
+        : basePlayState;
+  const playButtonRunning = !launching && hasActiveSession;
+  const controllerNavigable = !demo && canLaunchExecutables;
+  const hasPrimaryLaunchTarget = Boolean(
+    primaryLaunchTarget ||
+    primaryEmulatorTarget ||
+    steamLaunchEntry ||
+    xboxLaunchEntry,
+  );
   const canEditCover = game.source === "custom";
   const primaryExeName = game.exeNames[0];
-  const primaryExeEntry = useAppStore((state) =>
-    primaryExeName
-      ? state.exeCache.get(primaryExeName.toLowerCase())
-      : undefined,
+  const primaryExeEntry = primaryExeName
+    ? exeCache.get(primaryExeName.toLowerCase())
+    : undefined;
+  const primaryLocalLink = useMemo(
+    () =>
+      localLinks.find(
+        (link) =>
+          game.exeNames.some(
+            (exeName) => exeName.toLowerCase() === link.exeName.toLowerCase(),
+          ) &&
+          game.aliases.some(
+            (alias) =>
+              alias.gameId === link.gameId && alias.source === link.source,
+          ),
+      ),
+    [game.aliases, game.exeNames, localLinks],
+  );
+  const shareTarget = primaryLocalLink?.ref ?? primaryExeName;
+  const pendingCommunitySuggestion = useMemo(
+    () =>
+      findPendingCommunitySuggestionEntry(
+        game.exeNames,
+        exeCache,
+        scopedExeLinks,
+      ),
+    [exeCache, game.exeNames, scopedExeLinks],
   );
   const canSuggestToCommunity = canSuggestCustomGameToCommunity({
-    source: primaryExeEntry?.source ?? game.source,
+    source: primaryLocalLink?.source ?? primaryExeEntry?.source ?? game.source,
     exeName: primaryExeName,
     communitySuggestionId:
-      primaryExeEntry?.communitySuggestionId ?? game.communitySuggestionId,
+      primaryLocalLink?.communitySuggestionId ??
+      primaryExeEntry?.communitySuggestionId ??
+      game.communitySuggestionId,
     communitySuggestionStatus:
+      primaryLocalLink?.communitySuggestionStatus ??
       primaryExeEntry?.communitySuggestionStatus ??
       game.communitySuggestionStatus,
   });
-  // Shown in place of the title while hovering the card.
+  // Shown in place of the title while hovering the card with Shift held.
   const exeLabel =
     game.exeNames.filter(Boolean).join(", ") || game.emulatorLabels.join(", ");
+  const localDisplayedSeconds = Math.max(
+    0,
+    game.recordedSeconds + game.adjustmentSeconds,
+  );
+  const playtimeTitle =
+    game.libraryImports.length > 0
+      ? `Steam: ${formatDuration(game.providerFloorSeconds, showDurationDays)} · LudusAtlas: ${formatDuration(localDisplayedSeconds, showDurationDays)} · shown: ${formatDuration(game.totalSeconds, showDurationDays)} (highest single source, never added together).`
+      : undefined;
+  const trackingUnavailable =
+    game.libraryImports.length > 0 &&
+    game.exeNames.length === 0 &&
+    game.emulatorContentKeys.length === 0;
+  const offeredImport = game.libraryImports.find(
+    (item) =>
+      libraryMatchOffers.get(libraryEntryKey(item.provider, item.externalId))
+        ?.entry === item.entry,
+  );
+  const matchCheckImportEntry =
+    offeredImport ?? steamImportEntry ?? xboxImportEntry;
+  const libraryMatchOffer =
+    !demo && trackingUnavailable && offeredImport
+      ? libraryMatchOffers.get(
+          libraryEntryKey(offeredImport.provider, offeredImport.externalId),
+        )
+      : undefined;
+  const libraryMatchPrompt = libraryMatchOffer ? (
+    <LibraryMatchOffer
+      gameName={game.name}
+      onCover={!isList}
+      onReview={() => setShowMatchCheck(true)}
+      onDismiss={() =>
+        dismissLibraryMatchOffer(
+          libraryEntryKey(
+            libraryMatchOffer.entry.provider,
+            libraryMatchOffer.entry.externalId,
+          ),
+        )
+      }
+    />
+  ) : null;
+  const canCheckMatches = Boolean(
+    (game.source && game.exeNames[0]) ||
+    (trackingUnavailable && matchCheckImportEntry),
+  );
+  const trackingWarningMessage = trackingUnavailableMessage(
+    importedProviders,
+    canCheckMatches,
+  );
+  const showLaunchActions =
+    launchTourDemo ||
+    (!demo &&
+      (canConfigureLaunch ||
+        (canLaunchExecutables && gameEmulatorMappings.length > 0)));
+  const showMatchingActions =
+    canCheckMatches ||
+    Boolean(
+      game.source &&
+      game.exeNames[0] &&
+      (pendingCommunitySuggestion ||
+        canSuggestToCommunity ||
+        game.source === "igdb" ||
+        game.source === "community"),
+    );
 
   const demoNotice = () =>
     addToast({
@@ -1092,7 +2579,7 @@ function GameLibraryCard({
     if (!exeName) return;
     if (pendingCommunity && match.source === "community") {
       suggestTrackedGameToCommunity(
-        exeName,
+        shareTarget ?? exeName,
         match.name,
         match.coverUrl,
         match.id,
@@ -1100,7 +2587,11 @@ function GameLibraryCard({
         match.igdbId,
       );
     } else {
-      applyKnownGameMatch(exeName, match);
+      if (primaryLocalLink?.ref.kind === "scoped") {
+        applyLocalLinkGameMatch(primaryLocalLink.ref, match);
+      } else {
+        applyKnownGameMatch(exeName, match);
+      }
     }
     addToast({
       tone: "success",
@@ -1151,170 +2642,144 @@ function GameLibraryCard({
     });
   }
 
-  function closeShare() {
-    setShareOpen(false);
-    setShareSearch("");
-    setShareCandidates([]);
-    setShareHasMore(false);
-    setShareNextOffset(0);
-    setShareSelection(null);
-    setShareState("idle");
-    setShareMessage("");
-  }
-
-  async function searchShareCandidatePage(
-    offset: number,
-    append: boolean,
-    options: CommunityMetadataSearchOptions,
-  ) {
-    const query = shareSearch.trim();
-    if (query.length < 2 || isOffline) return;
-
-    setShareState(append ? "loading-more" : "loading");
-    setShareMessage("");
-    if (!append) setShareCandidates([]);
-    try {
-      const response = await fetch(
-        communityMetadataSearchUrl(apiEndpoint, query, offset, options),
-      );
-      if (!response.ok)
-        throw new Error(`${response.status} ${response.statusText}`);
-      const body = (await response.json()) as CommunityMetadataSearchResponse;
-      const candidates = append
-        ? mergeCommunityMetadataCandidates(shareCandidates, body.candidates)
-        : body.candidates;
-      setShareCandidates(candidates);
-      setShareHasMore(Boolean(body.hasMore));
-      setShareNextOffset(body.nextOffset ?? 0);
-      setShareMessage(
-        candidates.length > 0
-          ? body.hasMore
-            ? `${candidates.length} matches shown. Load more to keep looking.`
-            : `All ${candidates.length} matches shown. Pick the right game.`
-          : "No matching games found.",
-      );
-      setShareState("idle");
-    } catch (error) {
-      setShareState("error");
-      setShareMessage(formatError(error));
-    }
-  }
-
-  function searchShareCandidates(options: CommunityMetadataSearchOptions) {
-    return searchShareCandidatePage(0, false, options);
-  }
-
-  function loadMoreShareCandidates(options: CommunityMetadataSearchOptions) {
-    if (!shareHasMore) return;
-    return searchShareCandidatePage(shareNextOffset, true, options);
-  }
-
-  function applyShareCandidate(candidate: CommunityMetadataCandidate) {
-    if (!candidate.coverUrl) {
-      setShareSelection(null);
-      setShareMessage(
-        `${candidate.name} has no cover art. Pick a result with cover art.`,
-      );
-      return;
-    }
-
-    setShareSelection(candidate);
-    setShareMessage(`Selected ${candidate.name} from the database.`);
-  }
-
-  async function submitShareSuggestion() {
-    const exeName = game.exeNames[0];
-    if (!shareSelection?.coverUrl || !exeName) return;
-
-    setShareState("saving");
-    setShareMessage("");
-    try {
-      const response = await fetch(`${apiEndpoint}/api/community/suggestions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          exeName,
-          name: shareSelection.name,
-          coverUrl: shareSelection.coverUrl,
-          igdbId: shareSelection.igdbId,
-          installUuid: installUuid ?? undefined,
-        }),
+  const correction = useCommunityGameCorrection({
+    exeName: primaryExeName ?? "",
+    targetKey:
+      typeof shareTarget === "string"
+        ? shareTarget
+        : shareTarget
+          ? `${shareTarget.kind}:${shareTarget.key}`
+          : "",
+    resultInstruction: "Pick the right game.",
+    onKnownGame: (matchedGame) => {
+      if (!shareTarget) return;
+      applyLocalLinkGameMatch(shareTarget, matchedGame);
+      closeShare();
+      addToast({
+        tone: "success",
+        title: "Already in IGDB",
+        detail: `${matchedGame.name} is a known IGDB match for ${primaryExeName} and was applied directly.`,
       });
-      if (!response.ok)
-        throw new Error(`${response.status} ${response.statusText}`);
-
-      const result = (await response.json()) as CommunityGameSuggestionResponse;
-      if (result.igdbGame) {
-        applyGameMatch(exeName, result.igdbGame);
-        closeShare();
-        addToast({
-          tone: "success",
-          title: "Already in IGDB",
-          detail: `${result.igdbGame.name} is a known IGDB match for ${exeName} and was applied directly.`,
-        });
-        return;
-      }
-      if (result.rejected) {
-        if (result.id === undefined) throw new Error("Unexpected response");
-        suggestTrackedGameToCommunity(
-          exeName,
-          shareSelection.name,
-          shareSelection.coverUrl,
-          result.id,
-          false,
-          shareSelection.igdbId,
-        );
-        markCommunitySuggestionRejected(exeName, result.reviewNote);
-        closeShare();
-        addToast({
-          tone: "info",
-          title: "Suggestion already reviewed",
-          detail: result.reviewNote ?? "This suggestion was not accepted.",
-        });
-        return;
-      }
-      if (result.id === undefined) throw new Error("Unexpected response");
+    },
+    onRejected: (id, reviewNote, { selection }) => {
+      if (!shareTarget) return;
       suggestTrackedGameToCommunity(
-        exeName,
-        shareSelection.name,
-        shareSelection.coverUrl,
-        result.id,
-        result.verified ?? false,
-        shareSelection.igdbId,
+        shareTarget,
+        selection.name,
+        selection.coverUrl,
+        id,
+        false,
+        selection.igdbId,
+      );
+      markCommunitySuggestionRejected(shareTarget, reviewNote);
+      closeShare();
+      addToast({
+        tone: "info",
+        title: "Suggestion already reviewed",
+        detail: reviewNote ?? "This suggestion was not accepted.",
+      });
+    },
+    onSuggested: (id, verified, { selection }) => {
+      if (!shareTarget) return;
+      suggestTrackedGameToCommunity(
+        shareTarget,
+        selection.name,
+        selection.coverUrl,
+        id,
+        verified,
+        selection.igdbId,
       );
       closeShare();
       addToast({
         tone: "success",
         title: "Suggested to community",
-        detail: `Your community suggestion was submitted for ${exeName}.`,
+        detail: `Your community suggestion was submitted for ${primaryExeName}.`,
       });
-    } catch (error) {
-      setShareState("error");
-      setShareMessage(formatError(error));
-    }
+    },
+  });
+
+  function closeShare() {
+    setShareOpen(false);
+    correction.reset();
   }
 
-  const handleCopyExe = () => {
-    if (demo) return demoNotice();
-    navigator.clipboard.writeText(game.exeNames[0]);
+  async function handleShareAction() {
+    if (
+      !primaryLocalLink ||
+      (primaryLocalLink.shareState !== "failed" &&
+        primaryLocalLink.shareState !== "unshared")
+    ) {
+      setShareOpen(true);
+      return;
+    }
+    const outcome = await submitLocalLinkToCommunity(primaryLocalLink.ref);
+    if (outcome.kind === "failed") {
+      addToast({
+        tone: "error",
+        title: "Could not share executable",
+        detail: outcome.error,
+      });
+      return;
+    }
     addToast({
-      tone: "success",
-      title: "Copied",
-      detail: "File name copied to clipboard.",
+      tone: outcome.kind === "rejected" ? "info" : "success",
+      title:
+        outcome.kind === "already-known"
+          ? "Known match applied"
+          : outcome.kind === "rejected"
+            ? "Suggestion already reviewed"
+            : "Suggested to community",
+      detail: `${primaryLocalLink.exeName} remains linked to ${game.name} on this PC.`,
     });
-    contextMenu.close();
-  };
+  }
 
-  const handleCopyName = () => {
-    if (demo) return demoNotice();
-    navigator.clipboard.writeText(game.name);
-    addToast({
-      tone: "success",
-      title: "Copied",
-      detail: "Game name copied to clipboard.",
-    });
-    contextMenu.close();
-  };
+  function handleCancelSuggestion(target: PendingCommunitySuggestionTarget) {
+    setCancelSuggestionTarget(null);
+    void cancelCommunitySuggestion(target.ref, target.gameId).then(
+      (outcome) => {
+        if (outcome.kind === "cancelled") {
+          addToast({
+            tone: "success",
+            title: "Suggestion cancelled",
+            detail: `${game.name} is back to a private custom game. You can suggest it again anytime.`,
+          });
+        } else if (outcome.kind === "not-pending") {
+          addToast({
+            tone: "info",
+            title: "Suggestion changed",
+            detail:
+              "This suggestion is no longer pending and could not be cancelled.",
+          });
+        } else if (outcome.kind === "not-owner") {
+          addToast({
+            tone: "info",
+            title: "Can't cancel automatically",
+            detail:
+              "LudusAtlas can't verify this suggestion as yours, so it remains in review.",
+          });
+        } else if (outcome.kind === "unavailable") {
+          addToast({
+            tone: "info",
+            title: "Not available yet",
+            detail:
+              "This server does not support cancelling suggestions yet. Try again later.",
+          });
+        } else if (outcome.kind === "offline") {
+          addToast({
+            tone: "error",
+            title: "You're offline",
+            detail: "Reconnect and try cancelling again.",
+          });
+        } else {
+          addToast({
+            tone: "error",
+            title: "Could not cancel suggestion",
+            detail: outcome.error,
+          });
+        }
+      },
+    );
+  }
 
   const handleShowHistory = () => {
     if (demo) return demoNotice();
@@ -1470,44 +2935,606 @@ function GameLibraryCard({
     });
   }
 
-  const renderContextMenu = () => (
-    <ContextMenu
-      open={contextMenu.open}
-      position={contextMenu.position}
-      onClose={contextMenu.close}
-      dataTour={demo ? "demo-context-menu" : undefined}
-      focusFirstItem={demo}
-    >
-      <ContextMenuItem
-        dataTour={demo ? "demo-menu-show-history" : undefined}
-        icon={History}
-        onClick={handleShowHistory}
+  async function handleLaunch(target = primaryLaunchTarget) {
+    contextMenu.close();
+    if (launchTourDemo) {
+      emitTourEvent("mygames.demo-launch-attempted");
+      demoNotice();
+      return;
+    }
+    if (!target) {
+      addToast({
+        tone: "info",
+        title: "No launch file saved",
+        detail: canConfigureLaunch
+          ? `Start ${game.name} normally once, or set its launch file from the right-click menu.`
+          : `${game.name} does not have a Windows .exe that LudusAtlas can launch directly. Use its normal launcher.`,
+      });
+      return;
+    }
+    if (hasActiveSession) {
+      addToast({
+        tone: "info",
+        title: `${game.name} is already running`,
+        detail: "LudusAtlas is already tracking this game.",
+      });
+      return;
+    }
+    if (launching || launchBlocked) {
+      addToast({
+        tone: "info",
+        title: "A game is already starting",
+        detail: "Wait for LudusAtlas to finish the current launch first.",
+      });
+      return;
+    }
+    if (!onAcquireLaunch(launchKey)) {
+      addToast({
+        tone: "info",
+        title: "A game is already starting",
+        detail: "Wait for LudusAtlas to finish the current launch first.",
+      });
+      return;
+    }
+    setLaunching(true);
+    let keepLaunchFeedback = false;
+    try {
+      const outcome = await launchGame(target);
+      if (outcome === "busy") {
+        addToast({
+          tone: "info",
+          title: `${game.name} is starting`,
+          detail: "LudusAtlas already sent the launch request.",
+        });
+        return;
+      }
+      keepLaunchFeedback = true;
+      void scanProcessesNow().catch((error) =>
+        console.warn("post-launch process scan failed", error),
+      );
+    } catch (error) {
+      const message = launchErrorMessage(error, game.name);
+      addToast({ tone: "error", ...message });
+    } finally {
+      if (!keepLaunchFeedback) {
+        setLaunching(false);
+        onReleaseLaunch(launchKey);
+      }
+    }
+  }
+
+  async function handleEmulatorLaunch(
+    mapping: (typeof gameEmulatorMappings)[number],
+  ) {
+    contextMenu.close();
+    if (hasActiveSession) {
+      addToast({
+        tone: "info",
+        title: `${game.name} is already running`,
+        detail: "LudusAtlas is already tracking this game.",
+      });
+      return;
+    }
+    if (launching || launchBlocked || !onAcquireLaunch(launchKey)) {
+      addToast({
+        tone: "info",
+        title: "A game is already starting",
+        detail: "Wait for LudusAtlas to finish the current launch first.",
+      });
+      return;
+    }
+
+    setLaunching(true);
+    let keepLaunchFeedback = false;
+    try {
+      const outcome = await launchEmulatorGame(mapping);
+      if (outcome.kind === "busy") {
+        addToast({
+          tone: "info",
+          title: `${game.name} is starting`,
+          detail: "LudusAtlas already sent the launch request.",
+        });
+        return;
+      }
+      if (outcome.kind === "hostRunning") {
+        addToast({
+          tone: "info",
+          title: `${mapping.label} is still busy`,
+          detail: `Stop the current emulated game first. LudusAtlas only replaces ${mapping.label} automatically when it is safely idle.`,
+        });
+        return;
+      }
+      keepLaunchFeedback = true;
+      void scanProcessesNow().catch((error) =>
+        console.warn("post-launch process scan failed", error),
+      );
+    } catch (error) {
+      addToast({
+        tone: "error",
+        ...emulatorLaunchErrorMessage(error, game.name),
+      });
+    } finally {
+      if (!keepLaunchFeedback) {
+        setLaunching(false);
+        onReleaseLaunch(launchKey);
+      }
+    }
+  }
+
+  async function handleSteamLaunch() {
+    if (!steamLaunchEntry) return;
+    contextMenu.close();
+    if (hasActiveSession) {
+      addToast({
+        tone: "info",
+        title: `${game.name} is already running`,
+        detail: "LudusAtlas is already tracking this game.",
+      });
+      return;
+    }
+    if (launching || launchBlocked || !onAcquireLaunch(launchKey)) {
+      addToast({
+        tone: "info",
+        title: "A game is already starting",
+        detail: "Wait for LudusAtlas to finish the current launch first.",
+      });
+      return;
+    }
+    setLaunching(true);
+    let keepLaunchFeedback = false;
+    try {
+      const provider = await import("../../library/providers").then((module) =>
+        module.loadLibraryProvider("steam"),
+      );
+      await provider.launch(steamLaunchEntry.externalId);
+      keepLaunchFeedback = true;
+      void scanProcessesNow().catch((error) =>
+        console.warn("post-launch process scan failed", error),
+      );
+    } catch (error) {
+      if (shouldForgetLibraryInstallOnLaunchError(error)) {
+        removeLibraryInstall("steam", steamLaunchEntry.externalId);
+      }
+      addToast({
+        tone: "error",
+        ...libraryLaunchErrorMessage(error, game.name, "Steam"),
+      });
+    } finally {
+      if (!keepLaunchFeedback) {
+        setLaunching(false);
+        onReleaseLaunch(launchKey);
+      }
+    }
+  }
+
+  async function handleXboxLaunch() {
+    if (!xboxLaunchEntry) return;
+    contextMenu.close();
+    if (hasActiveSession) {
+      addToast({
+        tone: "info",
+        title: `${game.name} is already running`,
+        detail: "LudusAtlas is already tracking this game.",
+      });
+      return;
+    }
+    if (launching || launchBlocked || !onAcquireLaunch(launchKey)) {
+      addToast({
+        tone: "info",
+        title: "A game is already starting",
+        detail: "Wait for LudusAtlas to finish the current launch first.",
+      });
+      return;
+    }
+    setLaunching(true);
+    let keepLaunchFeedback = false;
+    try {
+      const provider = await import("../../library/providers").then((module) =>
+        module.loadLibraryProvider("xbox"),
+      );
+      await provider.launch(xboxLaunchEntry.externalId);
+      keepLaunchFeedback = true;
+      void scanProcessesNow().catch((error) =>
+        console.warn("post-launch process scan failed", error),
+      );
+    } catch (error) {
+      if (shouldForgetLibraryInstallOnLaunchError(error)) {
+        removeLibraryInstall("xbox", xboxLaunchEntry.externalId);
+      }
+      addToast({
+        tone: "error",
+        ...libraryLaunchErrorMessage(error, game.name, "Xbox"),
+      });
+    } finally {
+      if (!keepLaunchFeedback) {
+        setLaunching(false);
+        onReleaseLaunch(launchKey);
+      }
+    }
+  }
+
+  async function handleOpenInSteam() {
+    if (!steamImportEntry) return;
+    contextMenu.close();
+    try {
+      const provider = await import("../../library/providers").then((module) =>
+        module.loadLibraryProvider("steam"),
+      );
+      await provider.launch(steamImportEntry.externalId, "store");
+    } catch (error) {
+      addToast({
+        tone: "error",
+        title: `Could not open ${game.name} in Steam`,
+        detail: launchErrorDetail(error),
+      });
+    }
+  }
+  async function handleOpenXboxApp() {
+    if (!xboxImportEntry) return;
+    contextMenu.close();
+    try {
+      const provider = await import("../../library/providers").then((module) =>
+        module.loadLibraryProvider("xbox"),
+      );
+      await provider.launch(xboxImportEntry.externalId, "store");
+    } catch (error) {
+      addToast({
+        tone: "error",
+        title: "Could not open the Xbox app",
+        detail: formatError(error),
+      });
+    }
+  }
+
+  async function handleSetEmulatorLaunchFile(
+    mapping: (typeof gameEmulatorMappings)[number],
+  ) {
+    contextMenu.close();
+    try {
+      const target = await chooseEmulatorLaunchFile(mapping);
+      if (!target) return;
+      addToast({
+        tone: "success",
+        title: "Launch file saved",
+        detail: `${game.name} can now be started with ${mapping.label}.`,
+      });
+    } catch (error) {
+      addToast({
+        tone: "error",
+        title: "Launch file not set",
+        detail: formatError(error),
+      });
+    }
+  }
+
+  function handleConfirmEmulatorCandidate(
+    mapping: (typeof gameEmulatorMappings)[number],
+  ) {
+    contextMenu.close();
+    const target = confirmEmulatorLaunchCandidate(mapping.contentKey);
+    addToast(
+      target
+        ? {
+            tone: "success",
+            title: "Detected launch file confirmed",
+            detail: `${game.name} can now be started with ${mapping.label}.`,
+          }
+        : {
+            tone: "error",
+            title: "Detected file is no longer available",
+            detail: `Start ${game.name} again or select its game file manually.`,
+          },
+    );
+  }
+
+  function handleForgetEmulatorLaunchFile(
+    mapping: (typeof gameEmulatorMappings)[number],
+  ) {
+    contextMenu.close();
+    forgetEmulatorLaunchTarget(mapping.contentKey);
+    addToast({
+      tone: "info",
+      title: "Launch file forgotten",
+      detail: `Start ${game.name} once or select its game file again.`,
+    });
+  }
+
+  function handlePreferredLaunch() {
+    if (manualTarget) {
+      void handleLaunch(manualTarget);
+    } else if (xboxLaunchEntry) {
+      void handleXboxLaunch();
+    } else if (primaryLaunchTarget) {
+      void handleLaunch(primaryLaunchTarget);
+    } else if (primaryEmulatorMapping && primaryEmulatorTarget) {
+      void handleEmulatorLaunch(primaryEmulatorMapping);
+    } else if (steamLaunchEntry) {
+      void handleSteamLaunch();
+    } else {
+      void handleLaunch();
+    }
+  }
+
+  function handleLaunchFooterClick(element: HTMLElement) {
+    if (showPlayButton) {
+      handlePreferredLaunch();
+    } else if (primaryEmulatorMapping && primaryEmulatorCandidate) {
+      handleConfirmEmulatorCandidate(primaryEmulatorMapping);
+    } else if (primaryEmulatorMapping) {
+      void handleSetEmulatorLaunchFile(primaryEmulatorMapping);
+    } else if (gameEmulatorMappings.length > 1) {
+      openDemoMenu(element);
+    } else {
+      void handleSetLaunchFile();
+    }
+  }
+
+  async function handleSetLaunchFile() {
+    contextMenu.close();
+    try {
+      const target = await chooseLaunchTarget(
+        game.exeNames,
+        {
+          gameId: game.gameId,
+          source: game.source,
+        },
+        game.aliases,
+      );
+      if (!target) return;
+      addToast({
+        tone: "success",
+        title: "Launch file saved",
+        detail: `${game.name} can now be started from My Games.`,
+      });
+    } catch (error) {
+      addToast({
+        tone: "error",
+        title: "Launch file not set",
+        detail: formatError(error),
+      });
+    }
+  }
+
+  function handleForgetLaunchFile() {
+    contextMenu.close();
+    if (!primaryLaunchTarget) return;
+    if (manualTarget && primaryLaunchTarget === manualTarget) {
+      forgetManualLaunchTarget(manualTarget.owner);
+    } else {
+      forgetLaunchTarget(primaryLaunchTarget.exeName);
+    }
+    addToast({
+      tone: "info",
+      title: "Launch file forgotten",
+      detail: `Start ${game.name} once, or set its launch file again.`,
+    });
+  }
+
+  async function handleOpenInExplorer() {
+    contextMenu.close();
+    if (!primaryLaunchTarget) return;
+    try {
+      await revealGameExecutable(primaryLaunchTarget);
+    } catch (error) {
+      addToast({
+        tone: "error",
+        title: "Could not open the game file",
+        detail: formatError(error),
+      });
+    }
+  }
+
+  const renderDetailsDialog = () =>
+    showDetails ? (
+      <GameDetailsDialog
+        game={game}
+        launchTargets={ownedLaunchTargets}
+        onClose={() => setShowDetails(false)}
+      />
+    ) : null;
+
+  const renderContextMenu = () => {
+    if (!contextMenu.open) return null;
+    return (
+      <ContextMenu
+        open={contextMenu.open}
+        position={contextMenu.position}
+        onClose={contextMenu.close}
+        dataTour={demo ? "demo-context-menu" : undefined}
+        focusFirstItem={demo}
       >
-        Show History
-      </ContextMenuItem>
-      <ContextMenuItem
-        dataTour={demo ? "demo-menu-log-session" : undefined}
-        icon={ClockPlus}
-        onClick={() => {
-          contextMenu.close();
-          setShowAddPlaytime(true);
-        }}
-      >
-        Log missed session
-      </ContextMenuItem>
-      <ContextMenuItem
-        dataTour={demo ? "demo-menu-adjust-playtime" : undefined}
-        icon={Clock3}
-        onClick={() => {
-          contextMenu.close();
-          setShowAdjustPlaytime(true);
-        }}
-      >
-        Adjust total playtime
-      </ContextMenuItem>
-      {game.source && game.exeNames[0] ? (
-        <>
-          <ContextMenuSeparator />
+        <ContextMenuHeading>Info</ContextMenuHeading>
+        <ContextMenuItem
+          icon={Info}
+          onClick={() => {
+            contextMenu.close();
+            if (demo) return demoNotice();
+            setShowDetails(true);
+          }}
+        >
+          Open Details
+        </ContextMenuItem>
+        {steamActions.showOpenInLauncher ? (
+          <>
+            <ContextMenuHeading>Steam</ContextMenuHeading>
+            {steamActions.showPlayInLauncher ? (
+              <ContextMenuItem
+                icon={Play}
+                disabled={hasActiveSession || launching || launchBlocked}
+                onClick={() => void handleSteamLaunch()}
+              >
+                Play in Steam
+              </ContextMenuItem>
+            ) : null}
+            <ContextMenuItem
+              icon={ExternalLink}
+              onClick={() => void handleOpenInSteam()}
+            >
+              Open in Steam
+            </ContextMenuItem>
+          </>
+        ) : null}
+        {xboxActions.showOpenInLauncher ? (
+          <>
+            <ContextMenuHeading>Xbox</ContextMenuHeading>
+            {xboxActions.showPlayInLauncher ? (
+              <ContextMenuItem
+                icon={Play}
+                disabled={hasActiveSession || launching || launchBlocked}
+                onClick={() => void handleXboxLaunch()}
+              >
+                Play on Xbox
+              </ContextMenuItem>
+            ) : null}
+            <ContextMenuItem
+              icon={ExternalLink}
+              onClick={() => void handleOpenXboxApp()}
+            >
+              Open Xbox app
+            </ContextMenuItem>
+          </>
+        ) : null}
+        {showLaunchActions ? (
+          <ContextMenuHeading>Launch</ContextMenuHeading>
+        ) : null}
+        {launchTourDemo ? (
+          <ContextMenuItem
+            dataTour="demo-menu-launch-file"
+            icon={FolderSearch}
+            onClick={demoNotice}
+          >
+            Set or change launch file…
+          </ContextMenuItem>
+        ) : null}
+        {!demo && canConfigureLaunch ? (
+          <>
+            {ownedLaunchTargets.length > 0
+              ? ownedLaunchTargets.map((target) => (
+                  <ContextMenuItem
+                    key={target.exeName.toLowerCase()}
+                    icon={Play}
+                    disabled={hasActiveSession || launching || launchBlocked}
+                    title={
+                      hasActiveSession
+                        ? "Already running"
+                        : launching
+                          ? "Starting…"
+                          : launchBlocked
+                            ? "Another game is starting"
+                            : undefined
+                    }
+                    onClick={() => void handleLaunch(target)}
+                  >
+                    {ownedLaunchTargets.length > 1
+                      ? `Play (${target.exeName})`
+                      : "Play"}
+                  </ContextMenuItem>
+                ))
+              : null}
+            <ContextMenuItem
+              icon={FolderSearch}
+              onClick={() => void handleSetLaunchFile()}
+            >
+              {ownedLaunchTargets.length > 0
+                ? "Change launch file…"
+                : "Set launch file…"}
+            </ContextMenuItem>
+            {primaryLaunchTarget ? (
+              <ContextMenuItem
+                icon={FolderOpen}
+                title={primaryLaunchTarget.path}
+                onClick={() => void handleOpenInExplorer()}
+              >
+                Open in Explorer
+              </ContextMenuItem>
+            ) : null}
+            {ownedLaunchTargets.length > 0 ? (
+              <ContextMenuItem icon={Trash2} onClick={handleForgetLaunchFile}>
+                Forget launch file
+              </ContextMenuItem>
+            ) : null}
+          </>
+        ) : null}
+        {!demo && canLaunchExecutables && gameEmulatorMappings.length > 0 ? (
+          <>
+            {gameEmulatorMappings.map((mapping) => {
+              const target = resolveEmulatorLaunchTarget(
+                mapping.contentKey,
+                emulatorAutoLaunchTargets,
+                emulatorManualLaunchTargets,
+              );
+              const candidate = emulatorLaunchCandidates.get(
+                mapping.contentKey,
+              );
+              return (
+                <Fragment key={mapping.contentKey}>
+                  {target ? (
+                    <ContextMenuItem
+                      icon={Play}
+                      disabled={hasActiveSession || launching || launchBlocked}
+                      onClick={() => void handleEmulatorLaunch(mapping)}
+                    >
+                      Play with {mapping.label} · {mapping.display}
+                    </ContextMenuItem>
+                  ) : candidate ? (
+                    <ContextMenuItem
+                      icon={Check}
+                      onClick={() => handleConfirmEmulatorCandidate(mapping)}
+                    >
+                      Use detected {candidate.displayName}
+                    </ContextMenuItem>
+                  ) : null}
+                  <ContextMenuItem
+                    icon={FolderSearch}
+                    onClick={() => void handleSetEmulatorLaunchFile(mapping)}
+                  >
+                    {target ? "Change" : "Set"} {mapping.label} game file…
+                  </ContextMenuItem>
+                  {target ? (
+                    <ContextMenuItem
+                      icon={Trash2}
+                      onClick={() => handleForgetEmulatorLaunchFile(mapping)}
+                    >
+                      Forget {mapping.label} game file
+                    </ContextMenuItem>
+                  ) : null}
+                </Fragment>
+              );
+            })}
+          </>
+        ) : null}
+        <ContextMenuHeading>History</ContextMenuHeading>
+        <ContextMenuItem
+          dataTour={demo ? "demo-menu-show-history" : undefined}
+          icon={History}
+          onClick={handleShowHistory}
+        >
+          Show History
+        </ContextMenuItem>
+        <ContextMenuItem
+          dataTour={demo ? "demo-menu-log-session" : undefined}
+          icon={ClockPlus}
+          onClick={() => {
+            contextMenu.close();
+            setShowAddPlaytime(true);
+          }}
+        >
+          Log missed session
+        </ContextMenuItem>
+        <ContextMenuItem
+          dataTour={demo ? "demo-menu-adjust-playtime" : undefined}
+          icon={Clock3}
+          onClick={() => {
+            contextMenu.close();
+            setShowAdjustPlaytime(true);
+          }}
+        >
+          Adjust total playtime
+        </ContextMenuItem>
+        {showMatchingActions ? (
+          <ContextMenuHeading>Matching</ContextMenuHeading>
+        ) : null}
+        {canCheckMatches ? (
           <ContextMenuItem
             dataTour={demo ? "demo-menu-check-matches" : undefined}
             icon={Search}
@@ -1518,128 +3545,127 @@ function GameLibraryCard({
           >
             Check for Matches
           </ContextMenuItem>
-          {canSuggestToCommunity ? (
+        ) : null}
+        {game.source && game.exeNames[0] ? (
+          <>
+            {pendingCommunitySuggestion ? (
+              <ContextMenuItem
+                icon={RotateCcw}
+                onClick={() => {
+                  contextMenu.close();
+                  setCancelSuggestionTarget(pendingCommunitySuggestion);
+                }}
+              >
+                Cancel Suggestion
+              </ContextMenuItem>
+            ) : canSuggestToCommunity ? (
+              <ContextMenuItem
+                dataTour={demo ? "demo-menu-suggest-community" : undefined}
+                icon={Send}
+                onClick={() => {
+                  contextMenu.close();
+                  void handleShareAction();
+                }}
+              >
+                Suggest to Community
+              </ContextMenuItem>
+            ) : null}
+            {game.source === "igdb" || game.source === "community" ? (
+              <>
+                <ContextMenuItem
+                  dataTour={demo ? "demo-menu-report-match" : undefined}
+                  icon={Flag}
+                  onClick={() => {
+                    contextMenu.close();
+                    setReportOpen(true);
+                  }}
+                >
+                  Report Wrong Match
+                </ContextMenuItem>
+                <ContextMenuItem
+                  dataTour={demo ? "demo-menu-convert-custom" : undefined}
+                  icon={Gamepad2}
+                  onClick={() => {
+                    contextMenu.close();
+                    setConvertName(game.name);
+                    setShowConvert(true);
+                  }}
+                >
+                  Convert to Custom Game
+                </ContextMenuItem>
+              </>
+            ) : null}
+          </>
+        ) : null}
+        {canEditCover ? (
+          <>
+            <ContextMenuHeading>Edit</ContextMenuHeading>
             <ContextMenuItem
-              dataTour={demo ? "demo-menu-suggest-community" : undefined}
-              icon={Send}
+              dataTour={demo ? "demo-menu-rename" : undefined}
+              icon={Pencil}
               onClick={() => {
                 contextMenu.close();
-                setShareOpen(true);
+                setRenameName(game.name);
+                setShowRename(true);
               }}
             >
-              Suggest to Community
+              Rename Game
             </ContextMenuItem>
-          ) : null}
-          {game.source === "igdb" || game.source === "community" ? (
-            <>
-              <ContextMenuItem
-                dataTour={demo ? "demo-menu-report-match" : undefined}
-                icon={Flag}
-                onClick={() => {
-                  contextMenu.close();
-                  setReportOpen(true);
-                }}
-              >
-                Report Wrong Match
-              </ContextMenuItem>
-              <ContextMenuItem
-                dataTour={demo ? "demo-menu-convert-custom" : undefined}
-                icon={Gamepad2}
-                onClick={() => {
-                  contextMenu.close();
-                  setConvertName(game.name);
-                  setShowConvert(true);
-                }}
-              >
-                Convert to Custom Game
-              </ContextMenuItem>
-            </>
-          ) : null}
-        </>
-      ) : null}
-      {canEditCover ? (
-        <>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            dataTour={demo ? "demo-menu-rename" : undefined}
-            icon={Pencil}
-            onClick={() => {
-              contextMenu.close();
-              setRenameName(game.name);
-              setShowRename(true);
-            }}
-          >
-            Rename Game
-          </ContextMenuItem>
-          <ContextMenuItem
-            dataTour={demo ? "demo-menu-set-cover" : undefined}
-            icon={ImagePlus}
-            onClick={() => {
-              contextMenu.close();
-              coverInputRef.current?.click();
-            }}
-          >
-            Set Cover
-          </ContextMenuItem>
-          <ContextMenuItem
-            dataTour={demo ? "demo-menu-paste-cover" : undefined}
-            icon={Clipboard}
-            onClick={() => void handlePasteCover()}
-          >
-            Paste Cover
-          </ContextMenuItem>
-          {game.coverUrl ? (
             <ContextMenuItem
-              dataTour={demo ? "demo-menu-delete-cover" : undefined}
-              icon={Trash2}
-              onClick={handleClearCover}
+              dataTour={demo ? "demo-menu-set-cover" : undefined}
+              icon={ImagePlus}
+              onClick={() => {
+                contextMenu.close();
+                coverInputRef.current?.click();
+              }}
             >
-              Delete Cover
+              Set Cover
             </ContextMenuItem>
-          ) : null}
-        </>
-      ) : null}
-      <ContextMenuSeparator />
-      <ContextMenuItem
-        dataTour={demo ? "demo-menu-copy-name" : undefined}
-        icon={Copy}
-        onClick={handleCopyName}
-      >
-        Copy Game Name
-      </ContextMenuItem>
-      <ContextMenuItem
-        dataTour={demo ? "demo-menu-copy-exe" : undefined}
-        icon={Copy}
-        onClick={handleCopyExe}
-      >
-        Copy File Name
-      </ContextMenuItem>
-      <ContextMenuSeparator />
-      {onStopTracking ? (
+            <ContextMenuItem
+              dataTour={demo ? "demo-menu-paste-cover" : undefined}
+              icon={Clipboard}
+              onClick={() => void handlePasteCover()}
+            >
+              Paste Cover
+            </ContextMenuItem>
+            {game.coverUrl ? (
+              <ContextMenuItem
+                dataTour={demo ? "demo-menu-delete-cover" : undefined}
+                icon={Trash2}
+                onClick={handleClearCover}
+              >
+                Delete Cover
+              </ContextMenuItem>
+            ) : null}
+          </>
+        ) : null}
+        <ContextMenuSeparator />
+        {onStopTracking ? (
+          <ContextMenuItem
+            dataTour={demo ? "demo-menu-ignore" : undefined}
+            icon={Ban}
+            onClick={() => {
+              onStopTracking(game);
+              contextMenu.close();
+            }}
+          >
+            Ignore Game
+          </ContextMenuItem>
+        ) : null}
         <ContextMenuItem
-          dataTour={demo ? "demo-menu-ignore" : undefined}
-          icon={Ban}
+          dataTour={demo ? "demo-menu-remove" : undefined}
+          icon={Trash2}
+          danger
           onClick={() => {
-            onStopTracking();
+            onRemove(game);
             contextMenu.close();
           }}
         >
-          Ignore Game
+          Remove from Library
         </ContextMenuItem>
-      ) : null}
-      <ContextMenuItem
-        dataTour={demo ? "demo-menu-remove" : undefined}
-        icon={Trash2}
-        danger
-        onClick={() => {
-          onRemove();
-          contextMenu.close();
-        }}
-      >
-        Remove from Library
-      </ContextMenuItem>
-    </ContextMenu>
-  );
+      </ContextMenu>
+    );
+  };
 
   const demoCardProps = demo
     ? {
@@ -1653,14 +3679,41 @@ function GameLibraryCard({
         ref={cardRef}
         {...contextMenu.props}
         {...demoCardProps}
-        className="group flex flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-raised transition-all duration-300 hover:-translate-y-1 hover:border-accent/50 hover:shadow-card-hover"
+        data-controller-item={controllerNavigable ? "game-card" : undefined}
+        aria-busy={launching}
+        tabIndex={controllerNavigable ? -1 : undefined}
+        aria-label={
+          controllerNavigable
+            ? launching
+              ? `${game.name}, starting`
+              : `${game.name}, ${hasPrimaryLaunchTarget ? "press A to play" : "no launch file saved"}`
+            : undefined
+        }
+        className="game-library-card group relative isolate flex flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-raised transition-all duration-200 hover:-translate-y-1 hover:border-accent hover:ring-2 hover:ring-accent/50 hover:shadow-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg data-[controller-selected=true]:z-20 data-[controller-selected=true]:scale-[1.04] data-[controller-selected=true]:border-accent data-[controller-selected=true]:brightness-110 data-[controller-selected=true]:shadow-card-hover data-[controller-selected=true]:outline data-[controller-selected=true]:outline-2 data-[controller-selected=true]:outline-offset-[7px] data-[controller-selected=true]:outline-white/80 data-[controller-selected=true]:ring-[7px] data-[controller-selected=true]:ring-accent data-[controller-selected=true]:ring-offset-4 data-[controller-selected=true]:ring-offset-bg"
       >
+        {controllerNavigable ? (
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            data-controller-launch="game"
+            disabled={launching || launchBlocked}
+            className="hidden"
+            onClick={handlePreferredLaunch}
+          />
+        ) : null}
+        {launching ? (
+          <LaunchStartingOverlay
+            gameName={game.name}
+            detected={hasActiveSession}
+          />
+        ) : null}
         <div className="relative aspect-[3/4] w-full shrink-0 bg-surface-hover">
           {game.coverUrl ? (
-            <img
+            <GameCover
               src={game.coverUrl}
               alt=""
-              className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+              className="game-card-cover-image h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
             />
           ) : (
             <div className="grid h-full place-items-center text-xs text-text-faint">
@@ -1668,31 +3721,64 @@ function GameLibraryCard({
             </div>
           )}
 
-          {/* Badges top left */}
-          <div className="absolute left-2 top-2 z-20 flex flex-col items-start gap-1.5 drop-shadow-md">
-            {game.sources.map((source) => (
+          {/* Match seals top left. Origin coins sit beside the game name, so the
+              right column is just the tracking warning and the hover actions. */}
+          {matchVisible ? (
+            <GameProvenanceBadges
+              className="peer/provenance absolute left-2 top-2 z-40 drop-shadow-md"
+              sources={game.sources}
+              approval={communityApproval}
+              providers={importedProviders}
+              emulatorIds={game.emulatorIds}
+              unknownDurationProviders={unknownDurationProviders}
+              describeOrigins={originVisible}
+              dataTourPrefix={demo ? "demo-source" : undefined}
+            />
+          ) : null}
+
+          {trackingUnavailable && !libraryMatchOffer ? (
+            <div className="peer/tracking-warning group/tracking-warning absolute right-2 top-2 z-40">
               <span
-                key={source}
-                data-tour={demo ? `demo-source-${source}` : undefined}
+                role="img"
+                tabIndex={0}
+                aria-label={trackingWarningMessage}
+                title="New sessions won't be tracked yet"
+                className="grid h-8 w-8 cursor-help place-items-center rounded-full border border-warning-border bg-warning-tint text-warning shadow-raised outline-none transition hover:brightness-110 focus-visible:ring-2 focus-visible:ring-warning focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
               >
-                <SourceBadge source={source} />
+                <AlertTriangle size={16} />
               </span>
-            ))}
-            {game.emulatorIds.map((emulatorId) => (
-              <EmulatorBadge key={emulatorId} emulatorId={emulatorId} />
-            ))}
-            {game.sources.includes("custom") ? (
-              <CommunityApprovalBadge
-                suggestionId={game.communitySuggestionId}
-                verified={game.communitySuggestionVerified}
-                status={game.communitySuggestionStatus}
-              />
-            ) : null}
-          </div>
+              <div
+                role="tooltip"
+                className="pointer-events-none invisible absolute right-0 top-full mt-2 w-52 translate-y-1 rounded-md border border-warning-border bg-surface px-3 py-2 text-left opacity-0 shadow-raised transition group-hover/tracking-warning:visible group-hover/tracking-warning:translate-y-0 group-hover/tracking-warning:opacity-100 group-focus-within/tracking-warning:visible group-focus-within/tracking-warning:translate-y-0 group-focus-within/tracking-warning:opacity-100"
+              >
+                <div className="text-xs font-semibold text-warning">
+                  New sessions won&apos;t be tracked yet
+                </div>
+                <div className="mt-1 text-[11px] leading-4 text-text-muted">
+                  {trackingWarningMessage}
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {/* Hover Actions - Top Right (constructive first, destructive last) */}
-          <div className="absolute right-2 top-2 z-30 flex translate-x-2 flex-col gap-1.5 opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:opacity-100">
-            {game.source && game.exeNames[0] ? (
+          <div
+            className={clsx(
+              "game-card-hover-actions absolute right-2 z-30 flex translate-x-2 flex-col gap-1.5 opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:opacity-100 focus-within:translate-x-0 focus-within:opacity-100 peer-hover/provenance:pointer-events-none peer-hover/provenance:!opacity-0",
+              trackingUnavailable &&
+                "peer-focus-within/tracking-warning:pointer-events-none peer-focus-within/tracking-warning:!opacity-0 peer-hover/tracking-warning:pointer-events-none peer-hover/tracking-warning:!opacity-0",
+              trackingUnavailable && !libraryMatchOffer ? "top-12" : "top-2",
+              launchTourDemo && "translate-x-0 opacity-100",
+            )}
+          >
+            <IconButton
+              icon={Info}
+              aria-label={`Open details for ${game.name}`}
+              title="Open details"
+              onClick={() => (demo ? demoNotice() : setShowDetails(true))}
+              className="bg-bg text-text-muted shadow-raised border-bg hover:bg-accent hover:border-accent hover:text-accent-fg"
+            />
+            {canCheckMatches ? (
               <IconButton
                 icon={Search}
                 aria-label={`Check matches for ${game.name}`}
@@ -1701,12 +3787,22 @@ function GameLibraryCard({
                 className="bg-bg text-text-muted shadow-raised border-bg hover:bg-accent hover:border-accent hover:text-accent-fg"
               />
             ) : null}
-            {canSuggestToCommunity ? (
+            {pendingCommunitySuggestion ? (
+              <IconButton
+                icon={RotateCcw}
+                aria-label={`Cancel community suggestion for ${game.name}`}
+                title="Cancel suggestion"
+                onClick={() =>
+                  setCancelSuggestionTarget(pendingCommunitySuggestion)
+                }
+                className="bg-bg text-text-muted shadow-raised border-bg hover:bg-accent hover:border-accent hover:text-accent-fg"
+              />
+            ) : canSuggestToCommunity ? (
               <IconButton
                 icon={Send}
                 aria-label={`Suggest ${game.name} to the community`}
                 title="Suggest to community"
-                onClick={() => setShareOpen(true)}
+                onClick={() => void handleShareAction()}
                 className="bg-bg text-text-muted shadow-raised border-bg hover:bg-accent hover:border-accent hover:text-accent-fg"
               />
             ) : null}
@@ -1736,7 +3832,7 @@ function GameLibraryCard({
                 icon={Ban}
                 aria-label={`Ignore ${game.name}`}
                 title="Ignore game (never track again)"
-                onClick={onStopTracking}
+                onClick={() => onStopTracking(game)}
                 className="bg-bg text-text-muted shadow-raised border-bg hover:bg-warning hover:border-warning hover:text-white"
               />
             ) : null}
@@ -1745,10 +3841,34 @@ function GameLibraryCard({
               intent="danger"
               aria-label={`Remove ${game.name} from library`}
               title="Remove from library"
-              onClick={onRemove}
+              onClick={() => onRemove(game)}
               className="bg-bg text-text-muted shadow-raised border-bg hover:!bg-danger-solid hover:!border-danger-solid hover:!text-white"
             />
           </div>
+
+          {libraryMatchPrompt ? (
+            <div className="absolute inset-x-2 bottom-2 z-30">
+              {libraryMatchPrompt}
+            </div>
+          ) : null}
+          {game.communitySuggestionExeName && !game.communityUpgradeExeName ? (
+            <div className="absolute inset-x-2 bottom-2 z-30 drop-shadow-lg">
+              <CommunityLevelUpButton
+                gameName={game.name}
+                variant="cover-card"
+                onLevelUp={() => {
+                  convertLocalSuggestionToCommunity(
+                    game.communitySuggestionExeName!,
+                  );
+                  addToast({
+                    tone: "success",
+                    title: "Community match applied",
+                    detail: `${game.name} now uses the approved community match.`,
+                  });
+                }}
+              />
+            </div>
+          ) : null}
         </div>
         <input
           ref={coverInputRef}
@@ -1762,27 +3882,51 @@ function GameLibraryCard({
         />
 
         {/* Info Panel Below Cover */}
-        <div className="flex flex-1 flex-col border-t border-border bg-surface p-3">
-          <h2
-            className="truncate text-[15px] font-semibold text-text"
-            title={exeLabel ? `${game.name} (${exeLabel})` : game.name}
-          >
-            {exeLabel ? (
-              <>
-                <span className="group-hover:hidden">{game.name}</span>
-                <span className="hidden font-mono text-[13px] group-hover:inline">
-                  {exeLabel}
-                </span>
-              </>
-            ) : (
-              game.name
-            )}
-          </h2>
+        <div
+          className={clsx(
+            "flex flex-1 flex-col border-t border-border bg-surface",
+            isLarge ? "p-4" : "p-3",
+          )}
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            {/* Origin leads the name: where the game came from, then what it is */}
+            {originVisible ? (
+              <GameOriginBadges
+                providers={importedProviders}
+                emulatorIds={game.emulatorIds}
+                unknownDurationProviders={unknownDurationProviders}
+              />
+            ) : null}
+            <h2
+              className={clsx(
+                "min-w-0 flex-1 truncate font-semibold text-text",
+                isLarge ? "text-lg" : "text-[15px]",
+              )}
+              title={exeLabel ? `${game.name} (${exeLabel})` : game.name}
+            >
+              {exeLabel ? (
+                <>
+                  <span className="game-card-name-default">{game.name}</span>
+                  <span className="game-card-name-exe hidden font-mono text-[13px]">
+                    {exeLabel}
+                  </span>
+                </>
+              ) : (
+                game.name
+              )}
+            </h2>
+          </div>
           <div
             data-tour={demo ? "demo-playtime-result" : undefined}
-            className="mt-1 flex items-baseline gap-1.5"
+            className="mt-1 flex min-w-0 items-baseline gap-1.5"
           >
-            <span className="font-mono text-lg font-bold tracking-tight text-text">
+            <span
+              title={playtimeTitle}
+              className={clsx(
+                "font-mono font-bold tracking-tight text-text",
+                isLarge ? "text-xl" : "text-lg",
+              )}
+            >
               {formatDuration(game.totalSeconds, showDurationDays)}
             </span>
             <span className="text-[11px] font-medium text-text-muted">in</span>
@@ -1790,81 +3934,172 @@ function GameLibraryCard({
               type="button"
               disabled={game.sessionCount === 0}
               onClick={handleShowHistory}
-              className="text-[11px] font-medium text-text-muted underline decoration-text-faint underline-offset-2 transition-colors hover:text-accent disabled:no-underline"
+              className="truncate text-[11px] font-medium text-text-muted underline decoration-text-faint underline-offset-2 transition-colors hover:text-accent disabled:no-underline"
               aria-label={`Show ${game.sessionCount} session${game.sessionCount === 1 ? "" : "s"} for ${game.name} in history`}
             >
-              {game.sessionCount} session{game.sessionCount !== 1 ? "s" : ""}
+              {game.sessionCount} session
+              {game.sessionCount !== 1 ? "s" : ""}
             </button>
           </div>
 
           {/* Persistent Community Prompts */}
-          {(game.communityUpgradeExeName ||
-            game.communitySuggestionExeName) && (
+          {game.communityUpgradeExeName ? (
             <div className="mt-3 flex flex-col gap-2 border-t border-border/50 pt-3">
-              {game.communityUpgradeExeName ? (
-                <>
-                  <div
-                    className="truncate text-[11px] font-semibold text-success"
-                    title={`Found in database: ${game.communityUpgradeGameName}`}
-                  >
-                    Match found: {game.communityUpgradeGameName}
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="primary"
-                      title={`Track this exe as ${game.communityUpgradeGameName} from now on`}
-                      onClick={() => {
-                        acceptCommunityUpgrade(game.communityUpgradeExeName!);
-                        addToast({
-                          tone: "success",
-                          title: "Match applied",
-                          detail: `${game.name} now uses ${game.communityUpgradeGameName}.`,
-                        });
-                      }}
-                      className="flex-1 px-0 py-1 text-[11px]"
-                    >
-                      Use match
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      title="Keep the custom game and never show this match again"
-                      onClick={() =>
-                        dismissCommunityUpgrade(game.communityUpgradeExeName!)
-                      }
-                      className="px-2 py-1 text-[11px]"
-                    >
-                      Keep custom
-                    </Button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="text-[11px] font-semibold text-success">
-                    Your community suggestion was approved
-                  </div>
-                  <Button
-                    variant="primary"
-                    title="Switch to the community game and track it from now on"
-                    onClick={() => {
-                      convertLocalSuggestionToCommunity(
-                        game.communitySuggestionExeName!,
-                      );
-                      addToast({
-                        tone: "success",
-                        title: "Community match applied",
-                        detail: `${game.name} now uses the approved community match.`,
-                      });
-                    }}
-                    className="w-full py-1 text-[11px]"
-                  >
-                    Switch to community version
-                  </Button>
-                </>
-              )}
+              <div
+                className="truncate text-[11px] font-semibold text-success"
+                title={`Found in database: ${game.communityUpgradeGameName}`}
+              >
+                Match found: {game.communityUpgradeGameName}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="primary"
+                  title={`Track this exe as ${game.communityUpgradeGameName} from now on`}
+                  onClick={() => {
+                    acceptCommunityUpgrade(game.communityUpgradeExeName!);
+                    addToast({
+                      tone: "success",
+                      title: "Match applied",
+                      detail: `${game.name} now uses ${game.communityUpgradeGameName}.`,
+                    });
+                  }}
+                  className="flex-1 px-0 py-1 text-[11px]"
+                >
+                  Use match
+                </Button>
+                <Button
+                  variant="secondary"
+                  title="Keep the custom game and never show this match again"
+                  onClick={() =>
+                    dismissCommunityUpgrade(game.communityUpgradeExeName!)
+                  }
+                  className="px-2 py-1 text-[11px]"
+                >
+                  Keep custom
+                </Button>
+              </div>
             </div>
-          )}
+          ) : null}
         </div>
+        {primaryEmulatorCandidate && primaryEmulatorMapping ? (
+          <button
+            type="button"
+            title={`Confirm ${primaryEmulatorCandidate.displayName} as the ${primaryEmulatorMapping.label} game file for ${game.name}`}
+            onClick={() =>
+              handleConfirmEmulatorCandidate(primaryEmulatorMapping)
+            }
+            className="flex items-center gap-2 border-t border-warning-border bg-warning-tint px-3 py-2 text-left text-warning transition hover:brightness-110"
+          >
+            <AlertTriangle size={14} className="shrink-0" />
+            <span className="min-w-0">
+              <span className="block text-[10px] font-bold uppercase tracking-wide">
+                Action required
+              </span>
+              <span className="block truncate text-xs">
+                Confirm {primaryEmulatorCandidate.displayName} to enable Play
+              </span>
+            </span>
+          </button>
+        ) : null}
+        {showLaunchFooter ? (
+          <button
+            type="button"
+            aria-label={
+              showPlayButton
+                ? playState.ariaLabel
+                : primaryEmulatorCandidate
+                  ? `Confirm ${primaryEmulatorCandidate.displayName} as the ${primaryEmulatorMapping?.label ?? "emulator"} game file for ${game.name}`
+                  : gameEmulatorMappings.length > 1
+                    ? `Choose an emulator launch option for ${game.name}`
+                    : `Set launch file for ${game.name}`
+            }
+            title={
+              showPlayButton
+                ? playState.title
+                : primaryEmulatorCandidate
+                  ? `Confirm ${primaryEmulatorCandidate.displayName} for ${game.name}`
+                  : gameEmulatorMappings.length > 1
+                    ? "Choose emulator game…"
+                    : "Set launch file…"
+            }
+            data-tour={launchTourDemo ? "demo-launch-play" : undefined}
+            disabled={showPlayButton && playState.disabled}
+            onClick={(event) => handleLaunchFooterClick(event.currentTarget)}
+            className={clsx(
+              "flex shrink-0 items-center justify-center gap-2 border-t font-semibold transition disabled:cursor-not-allowed",
+              isLarge ? "h-12 text-sm" : "h-10 text-xs",
+              !showPlayButton
+                ? "border-border text-text-faint hover:bg-surface-hover hover:text-text-muted"
+                : playButtonRunning
+                  ? "border-success-border bg-success-tint text-success disabled:opacity-100"
+                  : "border-accent/30 bg-accent-tint text-accent hover:bg-accent hover:text-accent-fg",
+            )}
+          >
+            {!showPlayButton ? (
+              <>
+                {primaryEmulatorCandidate ? (
+                  <>
+                    <Check size={isLarge ? 16 : 14} className="shrink-0" />
+                    <span className="min-w-0 truncate">
+                      Use {primaryEmulatorCandidate.displayName}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <FolderSearch size={isLarge ? 16 : 14} />
+                    {gameEmulatorMappings.length > 1
+                      ? "Choose emulator game"
+                      : "Set launch file"}
+                  </>
+                )}
+              </>
+            ) : playButtonRunning ? (
+              <>
+                <span className="relative flex h-2.5 w-2.5 items-center justify-center">
+                  <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-success opacity-50 duration-1000" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success shadow-[0_0_6px_rgb(var(--color-success)/0.8)]" />
+                </span>
+                Running
+              </>
+            ) : playState.loading ? (
+              <>
+                <Loader2 size={isLarge ? 16 : 14} className="animate-spin" />
+                Starting…
+              </>
+            ) : (
+              <>
+                {/* Under controller nav the selected card swaps the play icon
+                    for the A glyph, so the button doubles as the button hint. */}
+                <Play
+                  size={isLarge ? 16 : 14}
+                  className={clsx(
+                    controllerNavigable &&
+                      "group-data-[controller-selected=true]:hidden",
+                  )}
+                />
+                {controllerNavigable ? (
+                  <span className="hidden group-data-[controller-selected=true]:inline-flex">
+                    <XboxButtonGlyph button="A" size="small" />
+                  </span>
+                ) : null}
+                Play
+              </>
+            )}
+          </button>
+        ) : showLaunchNote ? (
+          <div
+            title="LudusAtlas can't launch this game directly"
+            className={clsx(
+              "flex shrink-0 items-center justify-center gap-2 border-t border-border text-text-faint",
+              isLarge ? "h-12 text-sm" : "h-10 text-xs",
+            )}
+          >
+            <Info size={isLarge ? 16 : 14} />
+            Not launchable
+          </div>
+        ) : null}
         {renderContextMenu()}
+        {renderDetailsDialog()}
         {showAddPlaytime ? (
           <AddPlaytimeDialog
             game={game}
@@ -1882,20 +4117,38 @@ function GameLibraryCard({
           />
         ) : null}
         {showMatchCheck ? (
-          <MatchCheckDialog
-            game={game}
-            onCancel={() => setShowMatchCheck(false)}
-            onApply={handleApplyMatch}
-            onReportNotAGame={() => void handleNegativeReport()}
-            onSearchCommunity={
-              canSuggestToCommunity
-                ? () => {
-                    setShowMatchCheck(false);
-                    setShareOpen(true);
-                  }
-                : undefined
-            }
-          />
+          trackingUnavailable && matchCheckImportEntry ? (
+            <LibraryImportMatchCheckDialog
+              apiEndpoint={apiEndpoint}
+              entry={matchCheckImportEntry.entry}
+              install={matchCheckImportEntry.install}
+              ignoredProcesses={ignoredProcesses}
+              onCancel={() => setShowMatchCheck(false)}
+              onApplied={(executableNames) => {
+                setShowMatchCheck(false);
+                addToast({
+                  tone: "success",
+                  title: "Match applied",
+                  detail: `${executableNames.join(", ")} will now be tracked as ${game.name}.`,
+                });
+              }}
+            />
+          ) : (
+            <MatchCheckDialog
+              game={game}
+              onCancel={() => setShowMatchCheck(false)}
+              onApply={handleApplyMatch}
+              onReportNotAGame={() => void handleNegativeReport()}
+              onSearchCommunity={
+                canSuggestToCommunity
+                  ? () => {
+                      setShowMatchCheck(false);
+                      void handleShareAction();
+                    }
+                  : undefined
+              }
+            />
+          )
         ) : null}
         {reportOpen ? (
           <ReportWrongMatchDialog
@@ -1909,41 +4162,38 @@ function GameLibraryCard({
             onNotAGame={() => void handleNegativeReport()}
           />
         ) : null}
+        {cancelSuggestionTarget ? (
+          <CancelCommunitySuggestionDialog
+            gameName={game.name}
+            exeName={cancelSuggestionTarget.exeName}
+            isOffline={isOffline}
+            onCancel={() => setCancelSuggestionTarget(null)}
+            onConfirm={() => handleCancelSuggestion(cancelSuggestionTarget)}
+          />
+        ) : null}
         {shareOpen ? (
           <CommunitySuggestionForm
-            candidates={shareCandidates}
-            exeName={game.exeNames[0] ?? ""}
-            hasMore={shareHasMore}
-            message={shareMessage}
-            search={shareSearch}
-            selection={shareSelection}
-            state={shareState}
+            candidates={correction.candidates}
+            exeName={primaryExeName ?? ""}
+            hasMore={correction.hasMore}
+            message={correction.message}
+            search={correction.search}
+            selection={correction.selection}
+            state={correction.state}
             isOffline={isOffline}
-            onApplyCandidate={applyShareCandidate}
+            onApplyCandidate={correction.applyCandidate}
             onCancel={closeShare}
-            onLoadMore={loadMoreShareCandidates}
-            onSearch={(options) => void searchShareCandidates(options)}
-            onSearchChange={(value) => {
-              setShareSearch(value);
-              setShareSelection(null);
-              setShareCandidates([]);
-              setShareHasMore(false);
-              setShareNextOffset(0);
-              setShareMessage("");
-            }}
-            onSearchOptionsChange={() => {
-              setShareSelection(null);
-              setShareCandidates([]);
-              setShareHasMore(false);
-              setShareNextOffset(0);
-              setShareMessage("");
-            }}
-            onSubmit={() => void submitShareSuggestion()}
+            onLoadMore={correction.loadMore}
+            onSearch={correction.searchFirstPage}
+            onSearchChange={correction.setSearch}
+            onSearchOptionsChange={correction.resetResults}
+            onSubmit={() => void correction.submit()}
           />
         ) : null}
         {showConvert ? (
           <GameNameDialog
-            title={`Convert ${game.name} to a custom game`}
+            title="Convert to a custom game"
+            subtitle={game.name}
             description="Use this when the database match is wrong and the real game is not in any database. Recorded playtime stays with the game; the change is only on this PC."
             confirmLabel="Convert to custom"
             name={convertName}
@@ -1954,7 +4204,8 @@ function GameLibraryCard({
         ) : null}
         {showRename ? (
           <GameNameDialog
-            title={`Rename ${game.name}`}
+            title="Rename game"
+            subtitle={game.name}
             description="Changes the display name of this custom game everywhere, including recorded sessions."
             confirmLabel="Rename"
             name={renameName}
@@ -1973,12 +4224,40 @@ function GameLibraryCard({
       ref={cardRef}
       {...contextMenu.props}
       {...demoCardProps}
-      className="group rounded-xl border border-border bg-surface shadow-raised transition hover:border-accent/40"
+      data-controller-item={controllerNavigable ? "game-card" : undefined}
+      aria-busy={launching}
+      tabIndex={controllerNavigable ? -1 : undefined}
+      aria-label={
+        controllerNavigable
+          ? launching
+            ? `${game.name}, starting`
+            : `${game.name}, ${hasPrimaryLaunchTarget ? "press A to play" : "no launch file saved"}`
+          : undefined
+      }
+      className="game-library-card group relative isolate rounded-xl border border-border bg-surface shadow-raised transition duration-200 hover:border-accent hover:ring-2 hover:ring-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg data-[controller-selected=true]:z-20 data-[controller-selected=true]:scale-[1.025] data-[controller-selected=true]:border-accent data-[controller-selected=true]:brightness-110 data-[controller-selected=true]:shadow-card-hover data-[controller-selected=true]:outline data-[controller-selected=true]:outline-2 data-[controller-selected=true]:outline-offset-[7px] data-[controller-selected=true]:outline-white/80 data-[controller-selected=true]:ring-[7px] data-[controller-selected=true]:ring-accent data-[controller-selected=true]:ring-offset-4 data-[controller-selected=true]:ring-offset-bg"
     >
+      {controllerNavigable ? (
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-hidden="true"
+          data-controller-launch="game"
+          disabled={launching || launchBlocked}
+          className="hidden"
+          onClick={handlePreferredLaunch}
+        />
+      ) : null}
+      {launching ? (
+        <LaunchStartingOverlay
+          gameName={game.name}
+          detected={hasActiveSession}
+          compact
+        />
+      ) : null}
       <div className="grid grid-cols-[72px_minmax(0,1fr)_auto] items-center gap-4 p-3">
-        <div className="w-[72px] shrink-0">
+        <div className="relative w-[72px] shrink-0">
           {game.coverUrl ? (
-            <img
+            <GameCover
               src={game.coverUrl}
               alt=""
               className="aspect-[3/4] w-full rounded-lg object-cover"
@@ -1988,6 +4267,24 @@ function GameLibraryCard({
               No cover
             </div>
           )}
+          {game.communitySuggestionExeName && !game.communityUpgradeExeName ? (
+            <div className="absolute inset-x-1 bottom-1 z-20 drop-shadow-md">
+              <CommunityLevelUpButton
+                gameName={game.name}
+                variant="cover-list"
+                onLevelUp={() => {
+                  convertLocalSuggestionToCommunity(
+                    game.communitySuggestionExeName!,
+                  );
+                  addToast({
+                    tone: "success",
+                    title: "Community match applied",
+                    detail: `${game.name} now uses the approved community match.`,
+                  });
+                }}
+              />
+            </div>
+          ) : null}
         </div>
 
         <div className="min-w-0 py-1">
@@ -1998,8 +4295,8 @@ function GameLibraryCard({
             >
               {exeLabel ? (
                 <>
-                  <span className="group-hover:hidden">{game.name}</span>
-                  <span className="hidden font-mono text-sm group-hover:inline">
+                  <span className="game-card-name-default">{game.name}</span>
+                  <span className="game-card-name-exe hidden font-mono text-sm">
                     {exeLabel}
                   </span>
                 </>
@@ -2007,24 +4304,20 @@ function GameLibraryCard({
                 game.name
               )}
             </h2>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {game.sources.map((source) => (
-                <span
-                  key={source}
-                  data-tour={demo ? `demo-source-${source}` : undefined}
-                >
-                  <SourceBadge source={source} />
-                </span>
-              ))}
-              {game.emulatorIds.map((emulatorId) => (
-                <EmulatorBadge key={emulatorId} emulatorId={emulatorId} />
-              ))}
-            </div>
-            {game.sources.includes("custom") ? (
-              <CommunityApprovalBadge
-                suggestionId={game.communitySuggestionId}
-                verified={game.communitySuggestionVerified}
-                status={game.communitySuggestionStatus}
+            {matchVisible ? (
+              <GameMatchBadges
+                variant="label"
+                sources={game.sources}
+                approval={communityApproval}
+                dataTourPrefix={demo ? "demo-source" : undefined}
+              />
+            ) : null}
+            {originVisible ? (
+              <GameOriginBadges
+                variant="label"
+                providers={importedProviders}
+                emulatorIds={game.emulatorIds}
+                unknownDurationProviders={unknownDurationProviders}
               />
             ) : null}
           </div>
@@ -2040,63 +4333,57 @@ function GameLibraryCard({
             </span>
           </div>
 
-          {(game.communityUpgradeExeName ||
-            game.communitySuggestionExeName) && (
+          {primaryEmulatorCandidate && primaryEmulatorMapping ? (
+            <button
+              type="button"
+              title={`Confirm ${primaryEmulatorCandidate.displayName} as the ${primaryEmulatorMapping.label} game file for ${game.name}`}
+              onClick={() =>
+                handleConfirmEmulatorCandidate(primaryEmulatorMapping)
+              }
+              className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-md border border-warning-border bg-warning-tint px-2 py-1 text-xs font-medium text-warning transition hover:brightness-110"
+            >
+              <AlertTriangle size={13} className="shrink-0" />
+              <span className="truncate">
+                Action required: confirm {primaryEmulatorCandidate.displayName}
+              </span>
+            </button>
+          ) : null}
+
+          {libraryMatchPrompt}
+          {game.communityUpgradeExeName ? (
             <div className="mt-3 flex gap-2">
-              {game.communityUpgradeExeName ? (
-                <>
-                  <Button
-                    variant="secondary"
-                    title={`Track this exe as ${game.communityUpgradeGameName} from now on`}
-                    onClick={() => {
-                      acceptCommunityUpgrade(game.communityUpgradeExeName!);
-                      addToast({
-                        tone: "success",
-                        title: "Match applied",
-                        detail: `${game.name} now uses ${game.communityUpgradeGameName}.`,
-                      });
-                    }}
-                    className="max-w-64 border-success-border bg-success-tint px-3 py-1 text-xs text-success"
-                  >
-                    <span className="truncate">
-                      Use match: {game.communityUpgradeGameName}
-                    </span>
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    title="Keep the custom game and never show this match again"
-                    onClick={() =>
-                      dismissCommunityUpgrade(game.communityUpgradeExeName!)
-                    }
-                    className="px-3 py-1 text-xs"
-                  >
-                    Keep custom
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  variant="secondary"
-                  title="Your community suggestion was approved - track this game as the community game from now on"
-                  onClick={() => {
-                    convertLocalSuggestionToCommunity(
-                      game.communitySuggestionExeName!,
-                    );
-                    addToast({
-                      tone: "success",
-                      title: "Community match applied",
-                      detail: `${game.name} now uses the approved community match.`,
-                    });
-                  }}
-                  className="border-success-border bg-success-tint px-3 py-1 text-xs text-success"
-                >
-                  Suggestion approved - switch to community version
-                </Button>
-              )}
+              <Button
+                variant="secondary"
+                title={`Track this exe as ${game.communityUpgradeGameName} from now on`}
+                onClick={() => {
+                  acceptCommunityUpgrade(game.communityUpgradeExeName!);
+                  addToast({
+                    tone: "success",
+                    title: "Match applied",
+                    detail: `${game.name} now uses ${game.communityUpgradeGameName}.`,
+                  });
+                }}
+                className="max-w-64 border-success-border bg-success-tint px-3 py-1 text-xs text-success"
+              >
+                <span className="truncate">
+                  Use match: {game.communityUpgradeGameName}
+                </span>
+              </Button>
+              <Button
+                variant="secondary"
+                title="Keep the custom game and never show this match again"
+                onClick={() =>
+                  dismissCommunityUpgrade(game.communityUpgradeExeName!)
+                }
+                className="px-3 py-1 text-xs"
+              >
+                Keep custom
+              </Button>
             </div>
-          )}
+          ) : null}
         </div>
 
-        <div className="flex items-center gap-6 pr-2">
+        <div className="flex items-center gap-3 pr-2 lg:gap-6">
           <div
             data-tour={demo ? "demo-playtime-result" : undefined}
             className={clsx(
@@ -2109,7 +4396,9 @@ function GameLibraryCard({
                 Playtime
               </div>
               <div className="mt-0.5 font-mono text-sm font-semibold text-text">
-                {formatDuration(game.totalSeconds, showDurationDays)}
+                <span title={playtimeTitle}>
+                  {formatDuration(game.totalSeconds, showDurationDays)}
+                </span>
               </div>
             </div>
             <div className="text-right">
@@ -2130,7 +4419,49 @@ function GameLibraryCard({
             </div>
           </div>
 
-          <div className="flex flex-col gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+          {showPlayButton ? (
+            <IconButton
+              aria-label={playState.ariaLabel}
+              title={playState.title}
+              data-tour={launchTourDemo ? "demo-launch-play" : undefined}
+              disabled={playState.disabled}
+              onClick={handlePreferredLaunch}
+              className={clsx(
+                "shrink-0",
+                playButtonRunning
+                  ? "border-success-border bg-success-tint disabled:opacity-100"
+                  : "border-accent/30 bg-accent-tint text-accent hover:border-accent hover:bg-accent hover:text-accent-fg",
+              )}
+            >
+              {playButtonRunning ? (
+                <span className="relative flex h-2.5 w-2.5 items-center justify-center">
+                  <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-success opacity-50 duration-1000" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success shadow-[0_0_6px_rgb(var(--color-success)/0.8)]" />
+                </span>
+              ) : playState.loading ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : controllerNavigable ? (
+                <>
+                  <Play
+                    size={15}
+                    className="group-data-[controller-selected=true]:hidden"
+                  />
+                  <span className="hidden group-data-[controller-selected=true]:inline-flex">
+                    <XboxButtonGlyph button="A" size="small" />
+                  </span>
+                </>
+              ) : (
+                <Play size={15} />
+              )}
+            </IconButton>
+          ) : null}
+
+          <div
+            className={clsx(
+              "flex flex-col gap-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+              launchTourDemo && "opacity-100",
+            )}
+          >
             <IconButton
               icon={ClockPlus}
               aria-label={`Log a missed session for ${game.name}`}
@@ -2146,7 +4477,7 @@ function GameLibraryCard({
                 icon={Ban}
                 aria-label={`Ignore ${game.name}`}
                 title="Ignore game (never track again)"
-                onClick={onStopTracking}
+                onClick={() => onStopTracking(game)}
               />
             ) : null}
             <IconButton
@@ -2154,7 +4485,7 @@ function GameLibraryCard({
               intent="danger"
               aria-label={`Remove ${game.name} from library`}
               title="Remove from library"
-              onClick={onRemove}
+              onClick={() => onRemove(game)}
             />
           </div>
         </div>
@@ -2170,6 +4501,7 @@ function GameLibraryCard({
         }}
       />
       {renderContextMenu()}
+      {renderDetailsDialog()}
       {showAddPlaytime ? (
         <AddPlaytimeDialog
           game={game}
@@ -2187,20 +4519,38 @@ function GameLibraryCard({
         />
       ) : null}
       {showMatchCheck ? (
-        <MatchCheckDialog
-          game={game}
-          onCancel={() => setShowMatchCheck(false)}
-          onApply={handleApplyMatch}
-          onReportNotAGame={() => void handleNegativeReport()}
-          onSearchCommunity={
-            canSuggestToCommunity
-              ? () => {
-                  setShowMatchCheck(false);
-                  setShareOpen(true);
-                }
-              : undefined
-          }
-        />
+        trackingUnavailable && matchCheckImportEntry ? (
+          <LibraryImportMatchCheckDialog
+            apiEndpoint={apiEndpoint}
+            entry={matchCheckImportEntry.entry}
+            install={matchCheckImportEntry.install}
+            ignoredProcesses={ignoredProcesses}
+            onCancel={() => setShowMatchCheck(false)}
+            onApplied={(executableNames) => {
+              setShowMatchCheck(false);
+              addToast({
+                tone: "success",
+                title: "Match applied",
+                detail: `${executableNames.join(", ")} will now be tracked as ${game.name}.`,
+              });
+            }}
+          />
+        ) : (
+          <MatchCheckDialog
+            game={game}
+            onCancel={() => setShowMatchCheck(false)}
+            onApply={handleApplyMatch}
+            onReportNotAGame={() => void handleNegativeReport()}
+            onSearchCommunity={
+              canSuggestToCommunity
+                ? () => {
+                    setShowMatchCheck(false);
+                    void handleShareAction();
+                  }
+                : undefined
+            }
+          />
+        )
       ) : null}
       {reportOpen ? (
         <ReportWrongMatchDialog
@@ -2214,41 +4564,38 @@ function GameLibraryCard({
           onNotAGame={() => void handleNegativeReport()}
         />
       ) : null}
+      {cancelSuggestionTarget ? (
+        <CancelCommunitySuggestionDialog
+          gameName={game.name}
+          exeName={cancelSuggestionTarget.exeName}
+          isOffline={isOffline}
+          onCancel={() => setCancelSuggestionTarget(null)}
+          onConfirm={() => handleCancelSuggestion(cancelSuggestionTarget)}
+        />
+      ) : null}
       {shareOpen ? (
         <CommunitySuggestionForm
-          candidates={shareCandidates}
-          exeName={game.exeNames[0] ?? ""}
-          hasMore={shareHasMore}
-          message={shareMessage}
-          search={shareSearch}
-          selection={shareSelection}
-          state={shareState}
+          candidates={correction.candidates}
+          exeName={primaryExeName ?? ""}
+          hasMore={correction.hasMore}
+          message={correction.message}
+          search={correction.search}
+          selection={correction.selection}
+          state={correction.state}
           isOffline={isOffline}
-          onApplyCandidate={applyShareCandidate}
+          onApplyCandidate={correction.applyCandidate}
           onCancel={closeShare}
-          onLoadMore={loadMoreShareCandidates}
-          onSearch={(options) => void searchShareCandidates(options)}
-          onSearchChange={(value) => {
-            setShareSearch(value);
-            setShareSelection(null);
-            setShareCandidates([]);
-            setShareHasMore(false);
-            setShareNextOffset(0);
-            setShareMessage("");
-          }}
-          onSearchOptionsChange={() => {
-            setShareSelection(null);
-            setShareCandidates([]);
-            setShareHasMore(false);
-            setShareNextOffset(0);
-            setShareMessage("");
-          }}
-          onSubmit={() => void submitShareSuggestion()}
+          onLoadMore={correction.loadMore}
+          onSearch={correction.searchFirstPage}
+          onSearchChange={correction.setSearch}
+          onSearchOptionsChange={correction.resetResults}
+          onSubmit={() => void correction.submit()}
         />
       ) : null}
       {showConvert ? (
         <GameNameDialog
-          title={`Convert ${game.name} to a custom game`}
+          title="Convert to a custom game"
+          subtitle={game.name}
           description="Use this when the database match is wrong and the real game is not in any database. Recorded playtime stays with the game; the change is only on this PC."
           confirmLabel="Convert to custom"
           name={convertName}
@@ -2259,7 +4606,8 @@ function GameLibraryCard({
       ) : null}
       {showRename ? (
         <GameNameDialog
-          title={`Rename ${game.name}`}
+          title="Rename game"
+          subtitle={game.name}
           description="Changes the display name of this custom game everywhere, including recorded sessions."
           confirmLabel="Rename"
           name={renameName}
@@ -2271,6 +4619,8 @@ function GameLibraryCard({
     </article>
   );
 }
+
+const MemoizedGameLibraryCard = memo(GameLibraryCard);
 
 function GameMetric({ label, value }: { label: string; value: string }) {
   return (
@@ -2292,28 +4642,17 @@ function StopTrackingDialog({
   onCancel: () => void;
   onConfirm: (clearHistory: boolean) => void;
 }) {
-  useEscapeKey(onCancel);
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-4">
-      <div className="w-full max-w-md rounded-lg border border-border bg-surface p-5 shadow-raised">
-        <h2 className="text-lg font-semibold text-text">Ignore {game.name}?</h2>
-        <p className="mt-2 text-sm text-text-muted">
-          {game.emulatorLabels.length > 0
-            ? "LudusAtlas will ignore this local emulator-content mapping from now on. The emulator itself remains detectable."
-            : "LudusAtlas ignores this game's file from now on - it will never be tracked again. You can undo this anytime under Discovered → Ignored."}
-        </p>
-        {game.sessionCount > 0 ? (
-          <p className="mt-2 text-sm text-text-muted">
-            {game.sessionCount} completed{" "}
-            {game.sessionCount === 1 ? "session" : "sessions"} can be kept in My
-            History or cleared now.
-          </p>
-        ) : null}
-        <div className="mt-3 rounded-md border border-border bg-bg px-3 py-2 text-xs text-text-faint">
-          {game.exeNames.filter(Boolean).join(", ") ||
-            game.emulatorLabels.join(", ")}
-        </div>
-        <div className="mt-5 grid gap-2 sm:grid-cols-3">
+    <Modal
+      size="sm"
+      labelId="stop-tracking-dialog-title"
+      eyebrow="My Games"
+      title="Ignore this game?"
+      subtitle={game.name}
+      icon={Ban}
+      onClose={onCancel}
+      footer={
+        <div className="grid gap-2 sm:grid-cols-3">
           <Button variant="secondary" onClick={() => onConfirm(false)}>
             Ignore game
           </Button>
@@ -2324,12 +4663,29 @@ function StopTrackingDialog({
           >
             Ignore + clear history
           </Button>
-          <Button variant="ghost" onClick={onCancel}>
+          <Button variant="ghost" onClick={onCancel} data-autofocus>
             Cancel
           </Button>
         </div>
+      }
+    >
+      <p className="text-sm leading-6 text-text-muted">
+        {game.emulatorLabels.length > 0
+          ? "LudusAtlas will ignore this local emulator-content mapping from now on. The emulator itself remains detectable."
+          : "LudusAtlas ignores this game's file from now on - it will never be tracked again. You can undo this anytime under Discovered → Ignored."}
+      </p>
+      {game.sessionCount > 0 ? (
+        <p className="mt-2 text-sm leading-6 text-text-muted">
+          {game.sessionCount} completed{" "}
+          {game.sessionCount === 1 ? "session" : "sessions"} can be kept in My
+          History or cleared now.
+        </p>
+      ) : null}
+      <div className="mt-4 rounded-xl border border-border bg-bg px-3 py-2 text-xs text-text-faint">
+        {game.exeNames.filter(Boolean).join(", ") ||
+          game.emulatorLabels.join(", ")}
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -2342,19 +4698,17 @@ function RemoveGameDialog({
   onCancel: () => void;
   onConfirm: (removeHistory: boolean) => void;
 }) {
-  useEscapeKey(onCancel);
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-4">
-      <div className="w-full max-w-md rounded-lg border border-border bg-surface p-5 shadow-raised">
-        <h2 className="text-lg font-semibold text-text">
-          Remove {game.name} from library?
-        </h2>
-        <p className="mt-2 text-sm text-text-muted">
-          The game and its file match are removed, and a running session stops.
-          LudusAtlas will detect it again the next time you play - use Ignore
-          game if you want it gone for good.
-        </p>
-        <div className="mt-5 grid gap-2 sm:grid-cols-3">
+    <Modal
+      size="sm"
+      labelId="remove-game-dialog-title"
+      eyebrow="My Games"
+      title="Remove from library?"
+      subtitle={game.name}
+      icon={Trash2}
+      onClose={onCancel}
+      footer={
+        <div className="grid gap-2 sm:grid-cols-3">
           <Button variant="secondary" onClick={() => onConfirm(false)}>
             Remove
           </Button>
@@ -2365,8 +4719,14 @@ function RemoveGameDialog({
             Cancel
           </Button>
         </div>
-      </div>
-    </div>
+      }
+    >
+      <p className="text-sm leading-6 text-text-muted">
+        The game and its file match are removed, and a running session stops.
+        LudusAtlas will detect it again the next time you play, use Ignore game
+        if you want it gone for good.
+      </p>
+    </Modal>
   );
 }
 
@@ -2391,7 +4751,6 @@ function AddPlaytimeDialog({
   onCancel: () => void;
   onConfirm: (durationSeconds: number, endedAt: string) => void;
 }) {
-  useEscapeKey(onCancel);
   const [hours, setHours] = useState("");
   const [minutes, setMinutes] = useState("");
   const [dateValue, setDateValue] = useState(() =>
@@ -2410,136 +4769,103 @@ function AddPlaytimeDialog({
     onConfirm(durationSeconds, parsedDate.toISOString());
   };
 
-  return createPortal(
-    <div
-      data-tour={demo ? "demo-log-session-backdrop" : undefined}
-      className="fixed inset-0 z-50 grid place-items-center bg-black/65 p-4 backdrop-blur-sm sm:p-6"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onCancel();
-      }}
-    >
-      <div
-        data-tour={demo ? "demo-log-session-dialog" : undefined}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="log-session-title"
-        className="max-h-[90vh] w-full max-w-md animate-toast-in overflow-y-auto rounded-2xl border border-border bg-surface shadow-raised"
-      >
-        <div className="border-b border-border bg-gradient-to-br from-accent/10 via-surface to-surface px-5 py-5">
-          <div className="flex items-start gap-3.5">
-            <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-accent/20 bg-accent-tint text-accent shadow-sm">
-              <ClockPlus size={21} />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-accent">
-                History
-              </div>
-              <h2
-                id="log-session-title"
-                className="mt-0.5 text-xl font-bold text-text"
-              >
-                Log a missed session
-              </h2>
-              <p
-                className="mt-1 truncate text-sm text-text-muted"
-                title={game.name}
-              >
-                {game.name}
-              </p>
-            </div>
-          </div>
+  return (
+    <Modal
+      size="sm"
+      labelId="log-session-title"
+      eyebrow="History"
+      title="Log a missed session"
+      subtitle={game.name}
+      icon={ClockPlus}
+      onClose={onCancel}
+      dataTour={demo ? "demo-log-session-dialog" : undefined}
+      backdropDataTour={demo ? "demo-log-session-backdrop" : undefined}
+      footer={
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Button
+            data-tour={demo ? "demo-log-session-confirm" : undefined}
+            variant="primary"
+            icon={ClockPlus}
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+          >
+            Log session
+          </Button>
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
         </div>
+      }
+    >
+      <p className="text-sm leading-6 text-text-muted">
+        Use this when LudusAtlas missed a session you actually played. Choose
+        how long you played and when the session ended.
+      </p>
 
-        <div className="p-5">
-          <p className="text-sm leading-6 text-text-muted">
-            Use this when LudusAtlas missed a session you actually played.
-            Choose how long you played and when the session ended.
+      <div className="mt-4 flex gap-3 rounded-xl border border-accent/20 bg-accent-tint px-3.5 py-3 text-sm">
+        <History size={17} className="mt-0.5 shrink-0 text-accent" />
+        <div>
+          <div className="font-semibold text-text">Added to History</div>
+          <p className="mt-0.5 leading-5 text-text-muted">
+            This session will affect dates, streaks, and other play stats.
           </p>
-
-          <div className="mt-4 flex gap-3 rounded-xl border border-accent/20 bg-accent-tint px-3.5 py-3 text-sm">
-            <History size={17} className="mt-0.5 shrink-0 text-accent" />
-            <div>
-              <div className="font-semibold text-text">Added to History</div>
-              <p className="mt-0.5 leading-5 text-text-muted">
-                This session will affect dates, streaks, and other play stats.
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-5 rounded-xl border border-border bg-bg/60 p-4">
-            <div className="mb-3">
-              <h3 className="text-sm font-semibold text-text">
-                Session length
-              </h3>
-              <p className="mt-0.5 text-xs text-text-faint">
-                Enter the time you played in this session.
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="grid gap-1.5 text-xs font-medium text-text-muted">
-                Hours
-                <Input
-                  type="number"
-                  min={0}
-                  inputMode="numeric"
-                  value={hours}
-                  onChange={(event) => setHours(event.target.value)}
-                  placeholder="0"
-                  autoFocus
-                />
-              </label>
-              <label className="grid gap-1.5 text-xs font-medium text-text-muted">
-                Minutes
-                <Input
-                  type="number"
-                  min={0}
-                  max={59}
-                  inputMode="numeric"
-                  value={minutes}
-                  onChange={(event) => setMinutes(event.target.value)}
-                  placeholder="0"
-                />
-              </label>
-            </div>
-
-            <label className="mt-4 grid gap-1.5 text-xs font-medium text-text-muted">
-              <span className="inline-flex items-center gap-1.5">
-                <CalendarDays size={13} />
-                When did the session end?
-              </span>
-              <Input
-                type="datetime-local"
-                value={dateValue}
-                max={localDateTimeValue(new Date())}
-                onChange={(event) => setDateValue(event.target.value)}
-                className="w-full"
-              />
-            </label>
-          </div>
-
-          <p className="mt-3 text-xs leading-5 text-text-faint">
-            Only know the game&apos;s total time? Use Adjust total playtime
-            instead. It will not create a History entry.
-          </p>
-
-          <div className="mt-5 grid gap-2 sm:grid-cols-2">
-            <Button
-              data-tour={demo ? "demo-log-session-confirm" : undefined}
-              variant="primary"
-              icon={ClockPlus}
-              onClick={handleSubmit}
-              disabled={!canSubmit}
-            >
-              Log session
-            </Button>
-            <Button variant="ghost" onClick={onCancel}>
-              Cancel
-            </Button>
-          </div>
         </div>
       </div>
-    </div>,
-    document.body,
+
+      <div className="mt-5 rounded-xl border border-border bg-bg/60 p-4">
+        <div className="mb-3">
+          <h3 className="text-sm font-semibold text-text">Session length</h3>
+          <p className="mt-0.5 text-xs text-text-faint">
+            Enter the time you played in this session.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+            Hours
+            <Input
+              type="number"
+              min={0}
+              inputMode="numeric"
+              value={hours}
+              onChange={(event) => setHours(event.target.value)}
+              placeholder="0"
+              data-autofocus
+            />
+          </label>
+          <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+            Minutes
+            <Input
+              type="number"
+              min={0}
+              max={59}
+              inputMode="numeric"
+              value={minutes}
+              onChange={(event) => setMinutes(event.target.value)}
+              placeholder="0"
+            />
+          </label>
+        </div>
+
+        <label className="mt-4 grid gap-1.5 text-xs font-medium text-text-muted">
+          <span className="inline-flex items-center gap-1.5">
+            <CalendarDays size={13} />
+            When did the session end?
+          </span>
+          <Input
+            type="datetime-local"
+            value={dateValue}
+            max={localDateTimeValue(new Date())}
+            onChange={(event) => setDateValue(event.target.value)}
+            className="w-full"
+          />
+        </label>
+      </div>
+
+      <p className="mt-3 text-xs leading-5 text-text-faint">
+        Only know the game&apos;s total time? Use Adjust total playtime instead.
+        It will not create a History entry.
+      </p>
+    </Modal>
   );
 }
 
@@ -2554,7 +4880,6 @@ function AdjustPlaytimeDialog({
   onCancel: () => void;
   onConfirm: (targetSeconds: number) => void;
 }) {
-  useEscapeKey(onCancel);
   const [hours, setHours] = useState(() =>
     Math.floor(game.totalSeconds / 3600).toString(),
   );
@@ -2573,172 +4898,317 @@ function AdjustPlaytimeDialog({
     ? (hoursNumber * 60 + minutesNumber) * 60
     : 0;
 
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 grid place-items-center bg-black/65 p-4 backdrop-blur-sm sm:p-6"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onCancel();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="adjust-playtime-title"
-        className="max-h-[90vh] w-full max-w-md animate-toast-in overflow-y-auto rounded-2xl border border-border bg-surface shadow-raised"
-      >
-        <div className="border-b border-border bg-gradient-to-br from-accent/10 via-surface to-surface px-5 py-5">
-          <div className="flex items-start gap-3.5">
-            <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-accent/20 bg-accent-tint text-accent shadow-sm">
-              <Clock3 size={21} />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-accent">
-                Library total
-              </div>
-              <h2
-                id="adjust-playtime-title"
-                className="mt-0.5 text-xl font-bold text-text"
-              >
-                Adjust total playtime
-              </h2>
-              <p
-                className="mt-1 truncate text-sm text-text-muted"
-                title={game.name}
-              >
-                {game.name}
-              </p>
-            </div>
+  return (
+    <Modal
+      size="sm"
+      labelId="adjust-playtime-title"
+      eyebrow="Library total"
+      title="Adjust total playtime"
+      subtitle={game.name}
+      icon={Clock3}
+      onClose={onCancel}
+      footer={
+        <>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Button
+              variant="primary"
+              icon={Clock3}
+              type="submit"
+              form="adjust-playtime-form"
+              disabled={!valuesValid || disabled}
+            >
+              Save total
+            </Button>
+            <Button type="button" variant="ghost" onClick={onCancel}>
+              Cancel
+            </Button>
           </div>
-        </div>
-
-        <div className="p-5">
-          <p className="text-sm leading-6 text-text-muted">
-            Already played this game before using LudusAtlas? Enter the full
-            playtime shown by Steam or another launcher. You can also use this
-            to correct a total that is wrong.
-          </p>
-
-          <div className="mt-4 flex gap-3 rounded-xl border border-border bg-bg/60 px-3.5 py-3 text-sm">
-            <History size={17} className="mt-0.5 shrink-0 text-text-faint" />
-            <div>
-              <div className="font-semibold text-text">
-                History stays unchanged
-              </div>
-              <p className="mt-0.5 leading-5 text-text-muted">
-                No session is added, edited, or removed.
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-5 overflow-hidden rounded-xl border border-border bg-bg/60 text-sm">
-            <div className="flex items-center justify-between gap-3 px-4 py-2.5 text-text-muted">
-              <span>Time from sessions</span>
-              <span className="font-mono font-medium text-text">
-                {formatDuration(game.recordedSeconds)}
-              </span>
-            </div>
-            {game.adjustmentSeconds !== 0 ? (
-              <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-2.5 text-text-muted">
-                <span>Current adjustment</span>
-                <span className="font-mono font-medium text-text">
-                  {game.adjustmentSeconds > 0 ? "+" : "−"}
-                  {formatDuration(Math.abs(game.adjustmentSeconds))}
-                </span>
-              </div>
-            ) : null}
-            <div className="flex items-center justify-between gap-3 border-t border-accent/20 bg-accent-tint px-4 py-3">
-              <span className="font-semibold text-text">Current total</span>
-              <span className="font-mono text-base font-bold text-accent">
-                {formatDuration(game.totalSeconds)}
-              </span>
-            </div>
-          </div>
-
-          {disabled ? (
-            <div className="mt-4 rounded-xl border border-warning-border bg-warning-tint px-3.5 py-3 text-sm leading-5 text-warning">
-              Stop the active session before changing the total.
-            </div>
+          {game.adjustmentSeconds !== 0 ? (
+            <Button
+              type="button"
+              variant="ghost"
+              icon={RotateCcw}
+              className="mt-2 w-full"
+              disabled={disabled}
+              onClick={() => onConfirm(game.recordedSeconds)}
+            >
+              Reset to recorded time
+            </Button>
           ) : null}
+        </>
+      }
+    >
+      <p className="text-sm leading-6 text-text-muted">
+        Already played this game before using LudusAtlas? Enter the full
+        playtime shown by Steam or another launcher. You can also use this to
+        correct a total that is wrong.
+      </p>
 
-          <form
-            className="mt-5"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (valuesValid && !disabled) onConfirm(targetSeconds);
-            }}
-          >
-            <div className="rounded-xl border border-border bg-bg/60 p-4">
-              <div className="mb-3">
-                <h3 className="text-sm font-semibold text-text">New total</h3>
-                <p className="mt-0.5 text-xs text-text-faint">
-                  Enter the full total, not only the hours that are missing.
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="grid gap-1.5 text-xs font-medium text-text-muted">
-                  Hours
-                  <Input
-                    type="number"
-                    min={0}
-                    step={1}
-                    inputMode="numeric"
-                    value={hours}
-                    onChange={(event) => setHours(event.target.value)}
-                    autoFocus
-                  />
-                </label>
-                <label className="grid gap-1.5 text-xs font-medium text-text-muted">
-                  Minutes
-                  <Input
-                    type="number"
-                    min={0}
-                    max={59}
-                    step={1}
-                    inputMode="numeric"
-                    value={minutes}
-                    onChange={(event) => setMinutes(event.target.value)}
-                  />
-                </label>
-              </div>
-            </div>
-
-            {valuesValid && targetSeconds < game.recordedSeconds ? (
-              <div className="mt-3 rounded-xl border border-warning-border bg-warning-tint px-3.5 py-3 text-sm leading-5 text-warning">
-                This total is lower than your recorded sessions. Those sessions
-                will still stay in History.
-              </div>
-            ) : null}
-
-            <div className="mt-5 grid gap-2 sm:grid-cols-2">
-              <Button
-                variant="primary"
-                icon={Clock3}
-                type="submit"
-                disabled={!valuesValid || disabled}
-              >
-                Save total
-              </Button>
-              <Button type="button" variant="ghost" onClick={onCancel}>
-                Cancel
-              </Button>
-            </div>
-            {game.adjustmentSeconds !== 0 ? (
-              <Button
-                type="button"
-                variant="ghost"
-                icon={RotateCcw}
-                className="mt-2 w-full"
-                disabled={disabled}
-                onClick={() => onConfirm(game.recordedSeconds)}
-              >
-                Reset to recorded time
-              </Button>
-            ) : null}
-          </form>
+      <div className="mt-4 flex gap-3 rounded-xl border border-border bg-bg/60 px-3.5 py-3 text-sm">
+        <History size={17} className="mt-0.5 shrink-0 text-text-faint" />
+        <div>
+          <div className="font-semibold text-text">History stays unchanged</div>
+          <p className="mt-0.5 leading-5 text-text-muted">
+            No session is added, edited, or removed.
+          </p>
         </div>
       </div>
-    </div>,
-    document.body,
+
+      <div className="mt-5 overflow-hidden rounded-xl border border-border bg-bg/60 text-sm">
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 text-text-muted">
+          <span>Time from sessions</span>
+          <span className="font-mono font-medium text-text">
+            {formatDuration(game.recordedSeconds)}
+          </span>
+        </div>
+        {game.adjustmentSeconds !== 0 ? (
+          <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-2.5 text-text-muted">
+            <span>Current adjustment</span>
+            <span className="font-mono font-medium text-text">
+              {game.adjustmentSeconds > 0 ? "+" : "−"}
+              {formatDuration(Math.abs(game.adjustmentSeconds))}
+            </span>
+          </div>
+        ) : null}
+        <div className="flex items-center justify-between gap-3 border-t border-accent/20 bg-accent-tint px-4 py-3">
+          <span className="font-semibold text-text">Current total</span>
+          <span className="font-mono text-base font-bold text-accent">
+            {formatDuration(game.totalSeconds)}
+          </span>
+        </div>
+      </div>
+
+      {disabled ? (
+        <div className="mt-4 rounded-xl border border-warning-border bg-warning-tint px-3.5 py-3 text-sm leading-5 text-warning">
+          Stop the active session before changing the total.
+        </div>
+      ) : null}
+
+      <form
+        id="adjust-playtime-form"
+        className="mt-5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (valuesValid && !disabled) onConfirm(targetSeconds);
+        }}
+      >
+        <div className="rounded-xl border border-border bg-bg/60 p-4">
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-text">New total</h3>
+            <p className="mt-0.5 text-xs text-text-faint">
+              Enter the full total, not only the hours that are missing.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+              Hours
+              <Input
+                type="number"
+                min={0}
+                step={1}
+                inputMode="numeric"
+                value={hours}
+                onChange={(event) => setHours(event.target.value)}
+                data-autofocus
+              />
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+              Minutes
+              <Input
+                type="number"
+                min={0}
+                max={59}
+                step={1}
+                inputMode="numeric"
+                value={minutes}
+                onChange={(event) => setMinutes(event.target.value)}
+              />
+            </label>
+          </div>
+        </div>
+
+        {valuesValid && targetSeconds < game.recordedSeconds ? (
+          <div className="mt-3 rounded-xl border border-warning-border bg-warning-tint px-3.5 py-3 text-sm leading-5 text-warning">
+            This total is lower than your recorded sessions. Those sessions will
+            still stay in History.
+          </div>
+        ) : null}
+      </form>
+    </Modal>
+  );
+}
+
+function LibraryImportMatchCheckDialog({
+  apiEndpoint,
+  entry,
+  install,
+  ignoredProcesses,
+  onCancel,
+  onApplied,
+}: {
+  apiEndpoint: string;
+  entry: LibraryImportEntry;
+  install?: LibraryInstallEntry;
+  ignoredProcesses: ReadonlySet<string>;
+  onCancel: () => void;
+  onApplied: (executableNames: string[]) => void;
+}) {
+  const providerLabel =
+    providerTabConfig(entry.provider)?.label ?? entry.provider;
+  const isOffline = useIsOffline();
+  const [attempt, setAttempt] = useState(0);
+  const [result, setResult] = useState<LibraryImportMatchCheck | null>(null);
+  const [error, setError] = useState("");
+  const [applying, setApplying] = useState(false);
+
+  useEffect(() => {
+    if (isOffline) return;
+    let cancelled = false;
+    setResult(null);
+    setError("");
+    void checkLibraryImportForMatches({
+      apiEndpoint,
+      entry,
+      install,
+      ignoredProcesses,
+    })
+      .then((next) => {
+        if (!cancelled) setResult(next);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(formatError(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiEndpoint, attempt, entry, ignoredProcesses, install, isOffline]);
+
+  function applyMatch() {
+    if (result?.kind !== "found") return;
+    setApplying(true);
+    setError("");
+    try {
+      commitLibraryImports([result.commit]);
+      onApplied(result.executableNames);
+    } catch (cause) {
+      setError(formatError(cause));
+      setApplying(false);
+    }
+  }
+
+  const retry = () => setAttempt((value) => value + 1);
+  const footer =
+    result?.kind === "found" ? (
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Button
+          variant="primary"
+          icon={Check}
+          loading={applying}
+          onClick={applyMatch}
+        >
+          Use {result.executableNames.length === 1 ? "match" : "matches"}
+        </Button>
+        <Button variant="ghost" disabled={applying} onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    ) : (
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Button
+          variant="secondary"
+          icon={Search}
+          disabled={isOffline}
+          onClick={retry}
+        >
+          Check again
+        </Button>
+        <Button variant="ghost" onClick={onCancel}>
+          Close
+        </Button>
+      </div>
+    );
+
+  return (
+    <Modal
+      size="md"
+      labelId="library-match-check-title"
+      eyebrow={`${providerLabel} executable`}
+      title={`Check matches for ${entry.name}`}
+      subtitle={`${providerLabel} ${entry.provider === "steam" ? "AppID" : "Title ID"} ${entry.externalId}`}
+      icon={!result && !error && !isOffline ? Loader2 : Search}
+      iconSpin={!result && !error && !isOffline}
+      onClose={onCancel}
+      footer={footer}
+    >
+      <p className="text-sm leading-6 text-text-muted">
+        Checks whether IGDB or the approved Community database now knows an
+        executable for this {providerLabel} game.
+      </p>
+
+      <div className="mt-5" role="status" aria-live="polite">
+        {isOffline ? (
+          <div className="rounded-xl border border-warning-border bg-warning-tint p-5 text-sm text-warning">
+            <div className="flex items-center gap-2 font-medium">
+              <WifiOff size={17} /> Checking the database needs an internet
+              connection.
+            </div>
+          </div>
+        ) : error ? (
+          <div className="rounded-xl border border-danger-border bg-danger-tint p-5 text-sm text-danger">
+            <div className="font-semibold">The match check failed</div>
+            <div className="mt-1 text-text-muted">{error}</div>
+          </div>
+        ) : !result ? (
+          <div className="grid gap-2" aria-busy>
+            {Array.from({ length: 2 }, (_, index) => (
+              <div
+                key={index}
+                className="h-[72px] animate-pulse rounded-xl border border-border bg-surface-hover"
+              />
+            ))}
+            <span className="sr-only">
+              Checking IGDB and community databases…
+            </span>
+          </div>
+        ) : result.kind === "found" ? (
+          <div className="rounded-xl border border-success-border bg-success-tint p-5 text-sm text-success">
+            <div className="flex items-center gap-2 font-semibold">
+              <Check size={18} />{" "}
+              {result.executableNames.length === 1
+                ? "Executable match found"
+                : "Executable matches found"}
+            </div>
+            <div className="mt-2 font-mono text-xs text-text">
+              {result.executableNames.join(", ")}
+            </div>
+          </div>
+        ) : result.kind === "needs_install" ? (
+          <div className="rounded-xl border border-warning-border bg-warning-tint p-5 text-sm text-warning">
+            <div className="font-semibold">Local confirmation required</div>
+            <p className="mt-1 leading-5 text-text-muted">
+              The database knows {result.executableNames.join(", ")}, but the
+              filename can&apos;t be linked globally. Install the game and run a{" "}
+              {providerLabel} scan so LudusAtlas can safely scope it to that
+              folder.
+            </p>
+          </div>
+        ) : result.kind === "unsupported" ? (
+          <div className="rounded-xl border border-warning-border bg-warning-tint p-5 text-sm text-warning">
+            This LudusAtlas backend does not support {providerLabel} executable
+            checks yet.
+          </div>
+        ) : (
+          <div className="rounded-xl border border-border bg-bg/60 p-5 text-sm text-text-muted">
+            <div className="font-semibold text-text">No match found yet</div>
+            <p className="mt-1 leading-5">
+              There is still no approved executable for this {providerLabel}{" "}
+              game. You can check again after a Community suggestion has been
+              approved.
+            </p>
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -2868,14 +5338,14 @@ function MatchCheckDialog({
       title={`Check matches for ${game.name}`}
       subtitle={exeName}
       icon={state === "loading" && !isOffline ? Loader2 : Search}
+      iconSpin={state === "loading" && !isOffline}
       onClose={onCancel}
       footer={footer}
     >
       <p className="text-sm leading-6 text-text-muted">
-        Looks{" "}
-        <span className="font-mono font-medium text-text">{exeName}</span> up in
-        IGDB and in approved community matches. Picking one changes it on this PC
-        only.
+        Looks <span className="font-mono font-medium text-text">{exeName}</span>{" "}
+        up in IGDB and in approved community matches. Picking one changes it on
+        this PC only.
       </p>
 
       {flaggedIdentifier ? (
@@ -3040,6 +5510,7 @@ function MatchCheckDialog({
 
 function GameNameDialog({
   title,
+  subtitle,
   description,
   confirmLabel,
   name,
@@ -3048,6 +5519,7 @@ function GameNameDialog({
   onConfirm,
 }: {
   title: string;
+  subtitle: string;
   description: string;
   confirmLabel: string;
   name: string;
@@ -3055,43 +5527,53 @@ function GameNameDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  useEscapeKey(onCancel);
-  return createPortal(
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-4">
-      <div className="w-full max-w-md rounded-lg border border-border bg-surface p-5 shadow-raised">
-        <h2 className="text-lg font-semibold text-text">{title}</h2>
-        <p className="mt-2 text-sm text-text-muted">{description}</p>
+  return (
+    <Modal
+      size="sm"
+      labelId="game-name-dialog-title"
+      eyebrow="Custom game"
+      title={title}
+      subtitle={subtitle}
+      icon={Pencil}
+      onClose={onCancel}
+      footer={
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Button
+            variant="primary"
+            type="submit"
+            form="game-name-form"
+            disabled={!name.trim()}
+          >
+            {confirmLabel}
+          </Button>
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        </div>
+      }
+    >
+      <p className="mt-2 text-sm text-text-muted">{description}</p>
 
-        <form
-          className="mt-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onConfirm();
-          }}
-        >
-          <label className="grid gap-1.5 text-xs font-medium text-text-muted">
-            Game name
-            <Input
-              value={name}
-              onChange={(event) => onNameChange(event.target.value)}
-              maxLength={120}
-              autoFocus
-              placeholder="Game name..."
-            />
-          </label>
-
-          <div className="mt-5 grid gap-2 sm:grid-cols-2">
-            <Button variant="primary" type="submit" disabled={!name.trim()}>
-              {confirmLabel}
-            </Button>
-            <Button variant="ghost" onClick={onCancel}>
-              Cancel
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>,
-    document.body,
+      <form
+        id="game-name-form"
+        className="mt-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onConfirm();
+        }}
+      >
+        <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+          Game name
+          <Input
+            value={name}
+            onChange={(event) => onNameChange(event.target.value)}
+            maxLength={120}
+            data-autofocus
+            placeholder="Game name..."
+          />
+        </label>
+      </form>
+    </Modal>
   );
 }
 

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { compareMyGames, type MyGamesSortValue } from "./myGamesSort";
+import {
+  LAST_PLAYED_PROMOTION_DELAY_MS,
+  compareMyGames,
+  mergeLastPlayedEvidence,
+  shouldPromoteActiveGame,
+  type MyGamesSortValue,
+} from "./myGamesSort";
 
 function game(
   gameId: number,
@@ -17,6 +23,51 @@ function game(
 }
 
 describe("My Games sorting", () => {
+  it("replaces metadata timestamps with imported last-played evidence", () => {
+    expect(
+      mergeLastPlayedEvidence(
+        "2026-08-26T12:00:00.000Z",
+        "2026-08-19T12:00:00.000Z",
+        false,
+      ),
+    ).toBe("2026-08-19T12:00:00.000Z");
+  });
+
+  it("keeps the newest timestamp when both values are play evidence", () => {
+    expect(
+      mergeLastPlayedEvidence(
+        "2026-08-26T12:00:00.000Z",
+        "2026-08-19T12:00:00.000Z",
+        true,
+      ),
+    ).toBe("2026-08-26T12:00:00.000Z");
+    expect(
+      mergeLastPlayedEvidence(
+        "2026-08-19T12:00:00.000Z",
+        "2026-08-26T12:00:00.000Z",
+        true,
+      ),
+    ).toBe("2026-08-26T12:00:00.000Z");
+  });
+
+  it("waits 30 seconds before promoting an active game", () => {
+    const startedAt = "2026-08-19T12:00:00.000Z";
+    const startedAtMs = Date.parse(startedAt);
+
+    expect(
+      shouldPromoteActiveGame(
+        startedAt,
+        startedAtMs + LAST_PLAYED_PROMOTION_DELAY_MS - 1,
+      ),
+    ).toBe(false);
+    expect(
+      shouldPromoteActiveGame(
+        startedAt,
+        startedAtMs + LAST_PLAYED_PROMOTION_DELAY_MS,
+      ),
+    ).toBe(true);
+  });
+
   it("keeps concurrently active games stable when checkpoints advance", () => {
     const first = game(1, {
       activeStartedAt: "2026-08-19T11:00:00.000Z",

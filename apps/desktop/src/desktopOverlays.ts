@@ -8,6 +8,7 @@ import type {
   OverlayRenderContext,
 } from "./desktopOverlayProtocol";
 export {
+  OVERLAY_ACTION_EVENT,
   OVERLAY_CLEAR_EVENT,
   OVERLAY_FINISHED_EVENT,
   OVERLAY_SHOW_EVENT,
@@ -19,6 +20,8 @@ export type {
 } from "./desktopOverlayProtocol";
 
 export const OVERLAY_PRIORITY: Record<DesktopOverlayKind, number> = {
+  "current-session": 7,
+  "action-required": 6,
   milestone: 5,
   "first-detection": 4,
   "session-summary": 3,
@@ -39,14 +42,18 @@ export const DISCOVERY_BURST_MS = 30_000;
 export const DISCOVERY_COOLDOWN_MS = 1_800_000;
 
 const HOLD_MS: Record<DesktopOverlayKind, number> = {
-  "session-start": 5_000,
-  "first-detection": 5_000,
-  "session-summary": 4_200,
-  discovery: 4_200,
-  milestone: 4_800,
+  "current-session": 6_000,
+  "action-required": 15_000,
+  "session-start": 10_000,
+  "first-detection": 10_000,
+  "session-summary": 10_000,
+  discovery: 10_000,
+  milestone: 10_000,
 };
 
 const TTL_MS: Record<DesktopOverlayKind, number> = {
+  "current-session": 10_000,
+  "action-required": 15 * 60_000,
   "session-start": 20_000,
   "session-summary": 15 * 60_000,
   "first-detection": 5 * 60_000,
@@ -55,6 +62,20 @@ const TTL_MS: Record<DesktopOverlayKind, number> = {
 };
 
 export type OverlayEvent =
+  | {
+      type: "current-session";
+      gameName?: string;
+      coverUrl?: string;
+      durationSeconds: number;
+      sessionIndex?: number;
+      sessionCount?: number;
+    }
+  | {
+      type: "choice-required";
+      exeName: string;
+      candidateCount: number;
+      targetPids?: number[];
+    }
   | {
       type: "session-started";
       gameName: string;
@@ -89,7 +110,12 @@ export function overlayGate(
   event: OverlayEvent,
   settings: Settings,
 ): DesktopOverlayKind | null {
+  // Requested explicitly by a hotkey; automatic notification preferences do not apply.
+  if (event.type === "current-session") return "current-session";
   if (settings.desktopOverlaysEnabled !== true) return null;
+  if (event.type === "choice-required") {
+    return settings.overlayActionRequired !== false ? "action-required" : null;
+  }
   if (event.type === "session-started") {
     if (event.firstAutoDetection) {
       return settings.overlayFirstDetections !== false
@@ -121,7 +147,7 @@ export function buildOverlayMessage(
     id: `${kind}:${context.nowMs}:${sequence}`,
     sequence,
     kind,
-    targetPids: event.type === "session-started" ? event.targetPids : undefined,
+    targetPids: "targetPids" in event ? event.targetPids : undefined,
     priority: OVERLAY_PRIORITY[kind],
     ...copy,
     theme: context.theme,
@@ -138,19 +164,57 @@ function overlayCopy(
   event: OverlayEvent,
 ): Pick<
   DesktopOverlayMessage,
-  "kicker" | "title" | "body" | "metric" | "status" | "coverUrl"
+  | "kicker"
+  | "title"
+  | "body"
+  | "metric"
+  | "status"
+  | "coverUrl"
+  | "action"
+  | "actionLabel"
 > {
+  if (event.type === "current-session") {
+    return {
+      kicker: "CURRENT SESSION",
+      title: event.gameName ?? "No game active",
+      metric: event.gameName
+        ? formatDuration(event.durationSeconds)
+        : undefined,
+      coverUrl: event.coverUrl,
+      body: !event.gameName
+        ? "Start a game to track your session time."
+        : (event.sessionCount ?? 0) > 1
+          ? `${event.sessionIndex} of ${event.sessionCount} active games · Press again for next`
+          : undefined,
+    };
+  }
+  if (kind === "action-required" && event.type === "choice-required") {
+    return {
+      kicker: "CHOICE REQUIRED",
+      title: "Which game is this?",
+      body:
+        event.candidateCount === 2
+          ? "Two games use this file name. Pick one so tracking can start."
+          : `${event.candidateCount} games use this file name. Pick one so tracking can start.`,
+      action: "open-now-playing",
+      actionLabel: "Open Now Playing",
+    };
+  }
   if (kind === "discovery" && event.type === "discovery-burst") {
     return event.exeCount === 1
       ? {
           kicker: "NEW APP FOUND",
           title: "LudusAtlas doesn't know this one",
-          body: "Open Discovered to sort it out.",
+          body: "Open Discovered and tell it what this is.",
+          action: "open-discovered",
+          actionLabel: "Open Discovered",
         }
       : {
           kicker: "NEW APPS FOUND",
           title: `${event.exeCount} new apps found`,
-          body: "Open Discovered to sort them out.",
+          body: "Open Discovered and tell it what they are.",
+          action: "open-discovered",
+          actionLabel: "Open Discovered",
         };
   }
   if (event.type === "session-started") {
@@ -186,7 +250,7 @@ function overlayCopy(
     return {
       kicker: "SESSION SAVED",
       title: event.gameName,
-      body: `${formatDuration(event.totalSeconds)} total playtime`,
+      body: "Added to your playtime.",
       metric: formatDuration(event.durationSeconds),
       coverUrl: event.coverUrl,
     };
@@ -307,6 +371,18 @@ export class DesktopOverlayQueue {
     this.visible = null;
     this.state = "idle";
     this.drainNow();
+  }
+
+  /** An explicit request replaces the visible card and retains queued notifications. */
+  showImmediately(message: DesktopOverlayMessage) {
+    if (this.disposed) return;
+    if (this.visible) this.deps.hide(this.visible.id);
+    this.clearSafetyTimer();
+    this.clearDrainTimer();
+    this.visible = null;
+    this.state = "idle";
+    this.pending = this.pending.filter((item) => item.kind !== message.kind);
+    this.push(message);
   }
 
   clear() {

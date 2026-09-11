@@ -3,11 +3,11 @@
 CLAUDE.md
 AGENTS.md
 .superpowers/
+ERRORS.md
 
 # Environment & secrets
 .env
 .env.*
-!apps/.env.example
 !apps/desktop/.env.example
 !apps/desktop/.env.test
 !apps/desktop/.env.production
@@ -53,3 +53,4 @@ docs/*
 docs/update.md
 docs/work-summary.md
 docs/postgres-next-step-plan.md
+.playwright-mcp/

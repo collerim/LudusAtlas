@@ -9,6 +9,8 @@ import {
   emitOverlayEvent,
   initializeDesktopOverlays,
   noteDiscoveredExecutable,
+  previewDesktopOverlay,
+  showCurrentSessionOverlay,
 } from "./desktopOverlayBridge";
 import { useAppStore } from "./store";
 
@@ -42,11 +44,13 @@ beforeEach(() => {
     onFocusChanged,
   } as never);
   useAppStore.setState((state) => ({
+    activeSessions: [],
     settings: {
       ...state.settings,
       desktopOverlaysEnabled: false,
       overlayDiscoveries: false,
       overlayFirstDetections: true,
+      overlayMonitor: "primary",
     },
   }));
 });
@@ -69,6 +73,172 @@ function showCalls() {
 }
 
 describe("desktop overlay bridge", () => {
+  it("shows current elapsed time on request with automatic popups disabled", async () => {
+    vi.setSystemTime(90_000);
+    useAppStore.setState({
+      activeSessions: [
+        {
+          id: 1,
+          gameId: 1,
+          gameName: "Playing",
+          exeName: "game.exe",
+          coverUrl: "cover.jpg",
+          startedAt: new Date(0).toISOString(),
+          checkpointedAt: new Date(60_000).toISOString(),
+        },
+      ],
+    });
+    initializeDesktopOverlays();
+    showCurrentSessionOverlay();
+    await flush();
+    expect(showCalls()[0]?.[1]).toMatchObject({
+      payload: {
+        kind: "current-session",
+        title: "Playing",
+        kicker: "CURRENT SESSION",
+        metric: "1m",
+        monitor: "primary",
+        coverUrl: "cover.jpg",
+      },
+    });
+    expect(useAppStore.getState().activeSessions).toHaveLength(1);
+  });
+
+  it("cycles active games, skips unconfirmed recovery, and handles no active session", async () => {
+    const session = {
+      id: 1,
+      gameId: 1,
+      gameName: "One",
+      exeName: "game.exe",
+      coverUrl: "",
+      startedAt: new Date(0).toISOString(),
+      checkpointedAt: new Date(0).toISOString(),
+    };
+    useAppStore.setState({
+      activeSessions: [
+        session,
+        { ...session, id: 2, gameName: "Two" },
+        {
+          ...session,
+          id: 3,
+          gameName: "Unconfirmed",
+          recoveredFromCheckpoint: true,
+        },
+      ],
+    });
+    initializeDesktopOverlays();
+    showCurrentSessionOverlay();
+    showCurrentSessionOverlay();
+    showCurrentSessionOverlay();
+    useAppStore.setState({ activeSessions: [] });
+    showCurrentSessionOverlay();
+    await flush();
+    expect(
+      showCalls().map(
+        ([, args]) => (args as { payload: { title: string } }).payload.title,
+      ),
+    ).toEqual(["One", "Two", "One", "No game active"]);
+  });
+
+  it("shows requested time immediately and resumes queued notifications afterward", async () => {
+    useAppStore.setState((state) => ({
+      settings: { ...state.settings, desktopOverlaysEnabled: true },
+    }));
+    initializeDesktopOverlays();
+    armDesktopOverlays();
+    emitOverlayEvent({
+      type: "session-started",
+      gameName: "Visible",
+      firstAutoDetection: true,
+    });
+    emitOverlayEvent({
+      type: "session-started",
+      gameName: "Queued",
+      firstAutoDetection: true,
+    });
+    await flush();
+    showCurrentSessionOverlay();
+    await flush();
+    const finished = listenMock.mock.calls.find(
+      ([event]) => event === "playcounter:overlay-finished",
+    )?.[1];
+    const { payload } = showCalls()[1][1] as { payload: { id: string } };
+    finished?.({ payload: payload.id } as never);
+    await flush();
+    expect(
+      showCalls().map(
+        ([, args]) => (args as { payload: { title: string } }).payload.title,
+      ),
+    ).toEqual(["Visible", "No game active", "Queued"]);
+  });
+
+  it.each([true, false])(
+    "shows real popups with foreground focus=%s",
+    async (hasFocus) => {
+      visible = true;
+      focused = hasFocus;
+      useAppStore.setState((state) => ({
+        settings: { ...state.settings, desktopOverlaysEnabled: true },
+      }));
+      initializeDesktopOverlays();
+      armDesktopOverlays();
+      emitOverlayEvent({
+        type: "session-started",
+        gameName: "Game",
+        firstAutoDetection: true,
+      });
+      await flush();
+      expect(showCalls()).toHaveLength(1);
+      expect(showCalls()[0]?.[1]).toMatchObject({
+        payload: { monitor: "primary" },
+      });
+      for (const [handler] of onFocusChanged.mock.calls)
+        handler({ payload: true });
+      expect(
+        invokeMock.mock.calls.some(
+          ([command]) => command === "notification_overlay_close",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("uses the current monitor for previews and queued notifications", async () => {
+    useAppStore.setState((state) => ({
+      settings: { ...state.settings, desktopOverlaysEnabled: true },
+    }));
+    initializeDesktopOverlays();
+    armDesktopOverlays();
+    emitOverlayEvent({
+      type: "session-started",
+      gameName: "One",
+      firstAutoDetection: true,
+    });
+    emitOverlayEvent({
+      type: "session-started",
+      gameName: "Two",
+      firstAutoDetection: true,
+    });
+    await flush();
+    expect(showCalls()).toHaveLength(1);
+    useAppStore.getState().setOverlayMonitor("display-two");
+    const finished = listenMock.mock.calls.find(
+      ([event]) => event === "playcounter:overlay-finished",
+    )?.[1];
+    const { payload: firstPayload } = showCalls()[0]?.[1] as {
+      payload: { id: string };
+    };
+    finished?.({ payload: firstPayload.id } as never);
+    await flush();
+    expect(showCalls()).toHaveLength(2);
+    expect(showCalls()[1]?.[1]).toMatchObject({
+      payload: { monitor: "display-two" },
+    });
+    previewDesktopOverlay();
+    expect(showCalls()[2]?.[1]).toMatchObject({
+      payload: { monitor: "display-two" },
+    });
+  });
+
   it("is inert on macOS even when imported settings enable overlays", () => {
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,
@@ -90,19 +260,132 @@ describe("desktop overlay bridge", () => {
 
   it("initializes idempotently and tears down listeners", async () => {
     const eventUnlisten = vi.fn();
-    const focusUnlisten = vi.fn();
     listenMock.mockResolvedValue(eventUnlisten);
-    onFocusChanged.mockResolvedValue(focusUnlisten);
 
     initializeDesktopOverlays();
     initializeDesktopOverlays();
     await flush();
-    expect(listenMock).toHaveBeenCalledTimes(1);
-    expect(onFocusChanged).toHaveBeenCalledTimes(1);
+    expect(listenMock).toHaveBeenCalledTimes(2);
+    expect(onFocusChanged).not.toHaveBeenCalled();
 
     disposeDesktopOverlays();
-    expect(eventUnlisten).toHaveBeenCalledTimes(1);
-    expect(focusUnlisten).toHaveBeenCalledTimes(1);
+    expect(eventUnlisten).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["open-now-playing", "now"],
+    ["open-discovered", "discovered"],
+  ] as const)("routes %s popup actions to %s", async (action, view) => {
+    useAppStore.setState((state) => ({
+      activeView: "settings",
+      settings: { ...state.settings, desktopOverlaysEnabled: true },
+    }));
+    initializeDesktopOverlays();
+    await flush();
+    const registration = listenMock.mock.calls.find(
+      ([event]) => event === "playcounter:overlay-action",
+    );
+    const handler = registration?.[1] as
+      | ((event: { payload: string }) => void)
+      | undefined;
+
+    handler?.({ payload: action });
+
+    expect(useAppStore.getState().activeView).toBe(view);
+  });
+
+  it("shows an actionable ambiguity card while the app is in the tray", async () => {
+    useAppStore.setState((state) => ({
+      settings: {
+        ...state.settings,
+        desktopOverlaysEnabled: true,
+        overlayActionRequired: true,
+      },
+    }));
+    initializeDesktopOverlays();
+    armDesktopOverlays();
+
+    emitOverlayEvent({
+      type: "choice-required",
+      exeName: "Mixtape.exe",
+      candidateCount: 3,
+      targetPids: [4242],
+    });
+    await flush();
+
+    expect(showCalls()).toHaveLength(1);
+    expect(showCalls()[0]?.[1]).toMatchObject({
+      payload: {
+        kind: "action-required",
+        action: "open-now-playing",
+        targetPids: [4242],
+      },
+    });
+  });
+
+  it("shows every preview immediately instead of queueing them", async () => {
+    useAppStore.setState((state) => ({
+      settings: { ...state.settings, desktopOverlaysEnabled: true },
+    }));
+    initializeDesktopOverlays();
+    armDesktopOverlays();
+    await flush();
+
+    previewDesktopOverlay("first-detection");
+    previewDesktopOverlay("session-start");
+    previewDesktopOverlay("milestone");
+    await flush();
+
+    // A queued preview would sit behind the ten second hold of the one before
+    // it, and the lowest priority kind would be dropped by the pending cap.
+    expect(
+      showCalls().map(
+        ([, args]) =>
+          (
+            args as never as {
+              payload: { kind: string };
+            }
+          ).payload.kind,
+      ),
+    ).toEqual(["first-detection", "session-start", "milestone"]);
+  });
+
+  it("repeats a passive preview without waiting out the throttle", async () => {
+    useAppStore.setState((state) => ({
+      settings: { ...state.settings, desktopOverlaysEnabled: true },
+    }));
+    initializeDesktopOverlays();
+    armDesktopOverlays();
+    await flush();
+
+    previewDesktopOverlay("session-start");
+    await vi.advanceTimersByTimeAsync(200);
+    previewDesktopOverlay("session-start");
+    await flush();
+
+    expect(showCalls()).toHaveLength(2);
+  });
+
+  it("keeps a preview on screen when the main window regains focus", async () => {
+    useAppStore.setState((state) => ({
+      settings: { ...state.settings, desktopOverlaysEnabled: true },
+    }));
+    initializeDesktopOverlays();
+    armDesktopOverlays();
+    await flush();
+
+    previewDesktopOverlay("first-detection");
+    await flush();
+    for (const [handler] of onFocusChanged.mock.calls) {
+      handler({ payload: true });
+    }
+    await flush();
+
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "notification_overlay_close",
+      ),
+    ).toHaveLength(0);
   });
 
   it("does not replay discoveries captured while opted out", async () => {
@@ -140,7 +423,7 @@ describe("desktop overlay bridge", () => {
     expect(showCalls()).toHaveLength(0);
   });
 
-  it("does not arm discovery cooldown when focus suppresses the push", async () => {
+  it("shows discoveries while focused and preserves their cooldown", async () => {
     useAppStore.setState((state) => ({
       settings: {
         ...state.settings,
@@ -155,7 +438,7 @@ describe("desktop overlay bridge", () => {
     noteDiscoveredExecutable("one.exe");
     await vi.advanceTimersByTimeAsync(30_000);
     await flush();
-    expect(showCalls()).toHaveLength(0);
+    expect(showCalls()).toHaveLength(1);
 
     visible = false;
     focused = false;
@@ -165,15 +448,13 @@ describe("desktop overlay bridge", () => {
     expect(showCalls()).toHaveLength(1);
   });
 
-  it("invalidates a session event whose focus check was in flight", async () => {
-    let resolveVisible!: (value: boolean) => void;
-    windowMock.mockReturnValue({
-      isVisible: vi.fn(
-        () => new Promise<boolean>((resolve) => (resolveVisible = resolve)),
-      ),
-      isFocused: vi.fn(async () => false),
-      onFocusChanged,
-    } as never);
+  it("invalidates a session event whose game window check was in flight", async () => {
+    let markWindowReady!: (ready: boolean) => void;
+    invokeMock.mockImplementation((command) =>
+      command === "notification_overlay_wait_for_game_window"
+        ? new Promise<boolean>((resolve) => (markWindowReady = resolve))
+        : Promise.resolve(undefined),
+    );
     useAppStore.setState((state) => ({
       settings: { ...state.settings, desktopOverlaysEnabled: true },
     }));
@@ -183,14 +464,15 @@ describe("desktop overlay bridge", () => {
       type: "session-started",
       gameName: "Game",
       firstAutoDetection: true,
+      targetPids: [4242],
     });
     clearDesktopOverlays();
-    resolveVisible(false);
+    markWindowReady(true);
     await flush();
     expect(showCalls()).toHaveLength(0);
   });
 
-  it("waits for the launched game window before showing on its monitor", async () => {
+  it("waits for the launched game window before announcing the session", async () => {
     let markWindowReady!: (ready: boolean) => void;
     invokeMock.mockImplementation((command) =>
       command === "notification_overlay_wait_for_game_window"

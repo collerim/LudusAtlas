@@ -87,6 +87,70 @@
   background: rgb(var(--color-accent) / 0.15);
 }
 
+/* Controller focus is explicit because gamepad-driven HTMLElement.focus()
+   does not reliably activate the browser's :focus-visible heuristic. */
+[data-controller-selected="true"]:not(.game-library-card):not(.library-tab) {
+  position: relative;
+  z-index: 30;
+  outline: 5px solid rgb(var(--color-accent));
+  outline-offset: 3px;
+  box-shadow:
+    0 0 0 8px rgb(var(--color-bg) / 0.88),
+    0 0 24px rgb(var(--color-accent) / 0.72);
+}
+
+/* Library tabs live in a horizontally scrolling, vertically clipped strip, so
+   the outline ring above gets sliced into two floating side bars. They get an
+   inset treatment instead: everything stays inside the button's own box. */
+.library-tab {
+  position: relative;
+  z-index: 0;
+}
+
+.library-tab[data-controller-selected="true"] {
+  z-index: 30;
+  color: rgb(var(--color-text));
+  background: rgb(var(--color-accent) / 0.16);
+  box-shadow: inset 0 0 0 2px rgb(var(--color-accent) / 0.85);
+}
+
+.controller-scroll-focus-indicator {
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+[data-controller-mode="true"] .controller-content:focus {
+  outline: none;
+  box-shadow: inset -3px 0 0 rgb(var(--color-accent));
+}
+
+[data-controller-mode="true"]
+  .controller-content:focus
+  ~ .controller-scroll-focus-indicator {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+[data-controller-mode="true"]
+  .controller-content:focus::-webkit-scrollbar-thumb {
+  background: rgb(var(--color-accent));
+  border-color: rgb(var(--color-bg));
+  box-shadow: 0 0 10px rgb(var(--color-accent) / 0.75);
+}
+
+/* The Now Playing hero paints the card with the cover's own colours. Light
+   surfaces need less of it to keep the text readable. */
+.hero-backdrop {
+  opacity: 0.6;
+}
+
+:root[data-theme="light"] .hero-backdrop {
+  opacity: 0.35;
+}
+
 .emulator-badge {
   border-color: rgb(3 79 201);
   background: rgb(3 79 201);
@@ -228,6 +292,11 @@
   box-sizing: border-box;
 }
 
+:root[data-controller-mode="true"],
+:root[data-controller-mode="true"] * {
+  cursor: none !important;
+}
+
 body {
   margin: 0;
   min-width: 920px;
@@ -284,6 +353,34 @@ html[data-window="notification-overlay"] #overlay-root {
 
 .desktop-overlay-card-celebration {
   border-left: 3px solid rgb(var(--color-accent));
+}
+
+.desktop-overlay-card-actionable {
+  cursor: pointer;
+  border-left: 3px solid rgb(var(--color-accent));
+  pointer-events: auto;
+}
+
+.desktop-overlay-card-actionable:hover {
+  border-color: rgb(var(--color-accent));
+  background: rgb(var(--color-surface-hover) / 0.98);
+}
+
+.desktop-overlay-action {
+  max-width: 104px;
+  border: 1px solid rgb(var(--color-accent) / 0.5);
+  border-radius: 8px;
+  background: rgb(var(--color-accent) / 0.14);
+  color: rgb(var(--color-accent));
+  padding: 7px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.desktop-overlay-action:hover {
+  background: rgb(var(--color-accent) / 0.24);
 }
 
 .overlay-card-enter {
@@ -353,6 +450,15 @@ html[data-window="notification-overlay"] #overlay-root {
   height: 38px;
 }
 
+.desktop-overlay-cover-fallback .desktop-overlay-logo {
+  width: calc(100% - 10px);
+  max-width: 66px;
+  height: auto;
+  aspect-ratio: 1;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 10px rgb(0 0 0 / 0.3));
+}
+
 .desktop-overlay-mark {
   width: 34px;
   height: 34px;
@@ -365,14 +471,42 @@ html[data-window="notification-overlay"] #overlay-root {
   letter-spacing: 0.16em;
 }
 
+/* Session summaries put the duration in the same right-hand slot the other
+   overlay kinds use for their badge, stacked so the caption sits above the
+   number instead of hanging off its baseline. */
+.desktop-overlay-session-duration {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.desktop-overlay-session-duration span {
+  color: rgb(var(--color-text-muted));
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.desktop-overlay-session-duration strong {
+  color: rgb(var(--color-accent));
+  font-size: 23px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  text-shadow: 0 0 24px rgb(var(--color-accent) / 0.2);
+  white-space: nowrap;
+}
+
 .desktop-overlay-metric,
 .desktop-overlay-live {
   border: 1px solid rgb(var(--color-accent) / 0.35);
   border-radius: 999px;
-  padding: 5px 8px;
+  padding: 6px 9px;
   background: rgb(var(--color-accent) / 0.12);
   color: rgb(var(--color-accent));
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.08em;
   white-space: nowrap;
@@ -386,8 +520,8 @@ html[data-window="notification-overlay"] #overlay-root {
 }
 
 .desktop-overlay-live i {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
   background: currentColor;
   box-shadow: 0 0 10px currentColor;
@@ -424,6 +558,117 @@ html[data-window="notification-overlay"] #overlay-root {
   animation-delay: 820ms;
 }
 
+/* In-app feedback uses the same layered surface language as the desktop
+   overlay, condensed into an interactive toast-sized card. */
+.app-toast {
+  --toast-accent: var(--color-info);
+
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border: 1px solid rgb(var(--color-border) / 0.78);
+  border-left: 3px solid rgb(var(--toast-accent) / 0.9);
+  border-radius: 15px;
+  background:
+    radial-gradient(
+      circle at 100% 0%,
+      rgb(var(--toast-accent) / 0.14),
+      transparent 44%
+    ),
+    linear-gradient(
+      145deg,
+      rgb(var(--color-surface) / 0.98),
+      rgb(var(--color-bg) / 0.96)
+    );
+  box-shadow:
+    var(--shadow-raised),
+    inset 0 1px 0 rgb(255 255 255 / 0.07);
+}
+
+.app-toast::before {
+  position: absolute;
+  z-index: -1;
+  width: 90px;
+  height: 90px;
+  border-radius: 999px;
+  background: rgb(var(--toast-accent) / 0.08);
+  content: "";
+  filter: blur(28px);
+  left: -36px;
+  top: -48px;
+}
+
+.app-toast-success {
+  --toast-accent: var(--color-success);
+}
+
+.app-toast-error {
+  --toast-accent: var(--color-danger);
+}
+
+.app-toast-info {
+  --toast-accent: var(--color-info);
+}
+
+.app-toast-symbol {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgb(var(--toast-accent) / 0.38);
+  border-radius: 11px;
+  background:
+    linear-gradient(145deg, rgb(var(--toast-accent) / 0.18), transparent),
+    rgb(var(--color-surface-hover) / 0.76);
+  color: rgb(var(--toast-accent));
+  box-shadow:
+    0 7px 18px rgb(0 0 0 / 0.14),
+    inset 0 1px 0 rgb(255 255 255 / 0.08);
+}
+
+.app-toast-kicker {
+  overflow: hidden;
+  color: rgb(var(--toast-accent));
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.app-toast-dismiss {
+  border: 1px solid transparent;
+  background: rgb(var(--color-surface-hover) / 0.4);
+}
+
+.app-toast-dismiss:hover {
+  border-color: rgb(var(--color-border) / 0.7);
+  background: rgb(var(--color-surface-hover) / 0.86);
+}
+
+.app-toast-progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  animation: toast-lifetime 4.2s linear forwards;
+  background: rgb(var(--toast-accent) / 0.78);
+  transform-origin: left;
+}
+
+@keyframes toast-lifetime {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
 @keyframes overlay-glint {
   0%,
   100% {
@@ -441,6 +686,13 @@ html[data-window="notification-overlay"] #overlay-root {
     transition-duration: 120ms;
   }
   .desktop-overlay-glints {
+    display: none;
+  }
+  .app-toast {
+    animation: none !important;
+  }
+  .app-toast-progress {
+    animation: none;
     display: none;
   }
 }
@@ -622,5 +874,127 @@ select {
 @media (prefers-reduced-motion: reduce) {
   .tour-ring {
     animation: none;
+  }
+}
+
+/* Approved community suggestions get a small, celebratory level-up moment. */
+.level-up-cta {
+  opacity: 1;
+  color: rgb(var(--color-success));
+  border-color: rgb(var(--color-success-border));
+  background-color: rgb(var(--color-surface));
+  background-image: linear-gradient(
+    115deg,
+    rgb(var(--color-surface)) 0%,
+    rgb(var(--color-success-tint)) 52%,
+    rgb(var(--color-surface)) 100%
+  );
+  box-shadow:
+    0 8px 22px -10px rgb(0 0 0 / 0.9),
+    0 0 0 1px rgb(var(--color-success) / 0.12);
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.level-up-cta::after {
+  position: absolute;
+  inset: -50% auto -50% -35%;
+  width: 26%;
+  content: "";
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.55),
+    transparent
+  );
+  transform: translateX(-180%) rotate(14deg);
+  animation: level-up-sheen 3.2s ease-in-out infinite;
+}
+
+.level-up-cta:hover {
+  border-color: rgb(var(--color-success) / 0.62);
+  box-shadow:
+    0 10px 26px -14px rgb(var(--color-success) / 0.9),
+    0 0 0 3px rgb(var(--color-success) / 0.1);
+  transform: translateY(-1px);
+}
+
+.level-up-cta:focus-visible {
+  outline: 2px solid rgb(var(--color-success));
+  outline-offset: 2px;
+}
+
+/* Treat the cover CTA as its own hover target, not as a card hover. */
+.game-library-card:has(.level-up-cta:hover) {
+  border-color: rgb(var(--color-border));
+  box-shadow: var(--shadow-raised);
+  transform: none;
+}
+
+.game-library-card:has(.level-up-cta:hover) .game-card-cover-image {
+  transform: scale(1);
+}
+
+.game-library-card:has(.level-up-cta:hover) .game-card-hover-actions {
+  opacity: 0;
+  transform: translateX(0.5rem);
+}
+
+.game-library-card:has(.level-up-cta:hover) .game-card-name-default {
+  display: inline;
+}
+
+.game-library-card:has(.level-up-cta:hover) .game-card-name-exe {
+  display: none;
+}
+
+/* The card title only swaps to the .exe names while Shift is held. */
+body.shift-held
+  .game-library-card:not(:has(.level-up-cta:hover)):hover
+  .game-card-name-default {
+  display: none;
+}
+
+body.shift-held
+  .game-library-card:not(:has(.level-up-cta:hover)):hover
+  .game-card-name-exe {
+  display: inline;
+}
+
+.level-up-arrow {
+  animation: level-up-arrow 1.55s ease-in-out infinite;
+}
+
+@keyframes level-up-sheen {
+  0%,
+  58% {
+    transform: translateX(-180%) rotate(14deg);
+  }
+  82%,
+  100% {
+    transform: translateX(650%) rotate(14deg);
+  }
+}
+
+@keyframes level-up-arrow {
+  0%,
+  100% {
+    transform: translateY(1px);
+  }
+  45% {
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .level-up-cta::after,
+  .level-up-arrow {
+    animation: none;
+  }
+
+  .level-up-cta:hover {
+    transform: none;
   }
 }

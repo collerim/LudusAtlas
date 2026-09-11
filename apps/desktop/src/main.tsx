@@ -1,4 +1,3 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./ui/App";
@@ -27,12 +26,19 @@ function readPersistedAppearance() {
   }
 }
 
-const queryClient = new QueryClient();
-
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
+    <App />
   </React.StrictMode>,
 );
+
+// The native window starts hidden so no blank white frame is shown while the
+// webview boots and the saved geometry is restored. Reveal it once the first
+// frame is actually on screen.
+requestAnimationFrame(() => {
+  requestAnimationFrame(() => {
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("main_window_ready"))
+      .catch(() => {});
+  });
+});

@@ -12,7 +12,7 @@ planned or maintained.
 
 The project is in active fork development. The current foundation preserves
 PlayCounter tracking and Community compatibility; the LudusAtlas SQLite,
-Steam, platform-achievement, canonical-identity, and Compass phases are not yet
+Steam Web API, platform-achievement, canonical-identity, and Compass phases are not yet
 complete.
 
 ## Relationship to PlayCounter
@@ -46,14 +46,18 @@ license and upstream attribution are preserved in [LICENSE](./LICENSE) and
 
 ## Steam status
 
-Steam is the planned first native library and achievement provider. The future
+The inherited local Steam library importer is available, alongside Xbox import,
+optional direct game launching, controller navigation, and global hotkeys.
+See [STEAM_LOCAL_DATA.md](./STEAM_LOCAL_DATA.md) for local Steam data handling.
+
+Steam Web API integration is a planned library and achievement provider. The future
 setup will require a SteamID64 and a Steam Web API key, with the API key stored
 in OS-backed secure credential storage. No real Steam credential should be
 placed in source code, Git, localStorage, plaintext SQLite, logs, fixtures, or
 chat.
 
-Steam synchronization and platform achievements are not implemented in the
-current foundation phase.
+Steam Web API synchronization and platform achievements are not implemented in
+the current foundation phase.
 
 ## Privacy and local data
 
@@ -63,8 +67,12 @@ current foundation phase.
   never its full path.
 - Community contributions and feedback are sent only through the existing user
   actions and preferences.
-- A random LudusAtlas install UUID is used as an anonymous idempotency key; a
-  PlayCounter UUID is not copied during migration.
+- A random LudusAtlas install UUID is used as a pseudonymous installation key; a
+  PlayCounter UUID is not copied during migration. Inherited presence reporting
+  sends this ID at startup and hourly, including while running in the tray.
+  Presence reports do not include game names or play history.
+- Local Steam import sends selected AppIDs for metadata resolution, without
+  uploading account names, playtime, or install paths.
 - Secrets are excluded from the existing backup format and from the planned
   LudusAtlas durable-data backup design.
 
@@ -73,13 +81,15 @@ See [docs/DATA.md](./docs/DATA.md) for current ownership boundaries and
 
 ## Project structure
 
-| Path                | Description                                               |
-| ------------------- | --------------------------------------------------------- |
-| `apps/desktop`      | Tauri 2 + React 19 + TypeScript desktop application       |
-| `apps/api`          | Upstream-compatible Fastify Community/matching API        |
-| `packages/shared`   | Shared PlayCounter API and model contracts                |
-| `scripts/igdb-seed` | Upstream IGDB identifier seeding tools                    |
-| `landing`           | Guarded PlayCounter archive; never deployed by LudusAtlas |
+| Path              | Description                                               |
+| ----------------- | --------------------------------------------------------- |
+| `apps/desktop`    | Tauri 2 + React 19 + TypeScript desktop application       |
+| `packages/shared` | Shared PlayCounter API and model contracts                |
+| `landing`         | Guarded PlayCounter archive; never deployed by LudusAtlas |
+
+The upstream public backend and ingestion tools were removed in the v1.1.16
+synchronization; their historical MIT source remains in Git history. See
+[BACKEND.md](./BACKEND.md) for the upstream boundary.
 
 ## Development
 

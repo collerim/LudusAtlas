@@ -1,7 +1,9 @@
 import clsx from "clsx";
 import {
   forwardRef,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ButtonHTMLAttributes,
@@ -151,12 +153,13 @@ export function useEscapeKey(onClose: () => void) {
   }, [onClose]);
 }
 
-export type ModalSize = "sm" | "md" | "wide";
+export type ModalSize = "sm" | "md" | "wide" | "full";
 
 const modalSizes: Record<ModalSize, string> = {
   sm: "max-w-md",
   md: "max-w-lg",
   wide: "max-w-4xl",
+  full: "h-[80vh] max-w-none",
 };
 
 export function useDialogFocus(containerRef: RefObject<HTMLElement | null>) {
@@ -210,8 +213,12 @@ export function Modal({
   title,
   subtitle,
   icon: Icon,
+  iconSpin = false,
   onClose,
   footer,
+  bodyClassName,
+  dataTour,
+  backdropDataTour,
   children,
 }: {
   size?: ModalSize;
@@ -220,8 +227,12 @@ export function Modal({
   title: string;
   subtitle?: string;
   icon?: LucideIcon;
+  iconSpin?: boolean;
   onClose: () => void;
   footer?: ReactNode;
+  bodyClassName?: string;
+  dataTour?: string;
+  backdropDataTour?: string;
   children: ReactNode;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -230,6 +241,7 @@ export function Modal({
 
   return createPortal(
     <div
+      data-tour={backdropDataTour}
       className="fixed inset-0 z-50 grid place-items-center bg-black/65 p-4 backdrop-blur-sm sm:p-6"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -237,29 +249,37 @@ export function Modal({
     >
       <div
         ref={panelRef}
+        data-tour={dataTour}
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelId}
         tabIndex={-1}
-        className={`flex max-h-[90vh] w-full ${modalSizes[size]} animate-toast-in flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-raised outline-none`}
+        className={clsx(
+          "flex max-h-[90vh] w-full animate-modal-in flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-raised outline-none motion-reduce:animate-none",
+          modalSizes[size],
+        )}
       >
-        <div className="shrink-0 border-b border-border bg-gradient-to-br from-accent/10 via-surface to-surface px-5 py-4 sm:px-6">
+        <div className="relative shrink-0 border-b border-border bg-gradient-to-br from-accent/10 via-surface to-surface px-5 py-5 before:absolute before:inset-x-5 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-accent/80 before:to-transparent sm:px-6 sm:before:inset-x-6">
           <div className="flex items-start gap-3">
             {Icon ? (
-              <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-accent/20 bg-accent/10 text-accent">
-                <Icon size={20} />
+              <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-accent/20 bg-accent-tint text-accent shadow-sm">
+                <Icon
+                  size={21}
+                  className={
+                    iconSpin
+                      ? "animate-spin motion-reduce:animate-none"
+                      : undefined
+                  }
+                />
               </div>
             ) : null}
             <div className="min-w-0 flex-1">
               {eyebrow ? (
-                <div className="text-xs font-semibold uppercase tracking-wider text-accent">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-accent">
                   {eyebrow}
                 </div>
               ) : null}
-              <h2
-                id={labelId}
-                className="mt-0.5 text-lg font-semibold text-text"
-              >
+              <h2 id={labelId} className="mt-0.5 text-xl font-bold text-text">
                 {title}
               </h2>
               {subtitle ? (
@@ -274,7 +294,13 @@ export function Modal({
             <IconButton icon={X} aria-label="Close" onClick={onClose} />
           </div>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-6">
+        <div
+          data-controller-scroll
+          className={clsx(
+            "min-h-0 flex-1 overflow-y-auto p-5 sm:p-6",
+            bodyClassName,
+          )}
+        >
           {children}
         </div>
         {footer ? (
@@ -292,17 +318,17 @@ export function useContextMenu() {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ x: 0, y: 0 });
 
-  const onContextMenu = (e: MouseEvent) => {
+  const onContextMenu = useCallback((e: MouseEvent) => {
     e.preventDefault();
     setPosition({ x: e.clientX, y: e.clientY });
     setOpen(true);
-  };
+  }, []);
 
-  const close = () => setOpen(false);
-  const openAt = (nextPosition: { x: number; y: number }) => {
+  const close = useCallback(() => setOpen(false), []);
+  const openAt = useCallback((nextPosition: { x: number; y: number }) => {
     setPosition(nextPosition);
     setOpen(true);
-  };
+  }, []);
 
   return {
     props: { onContextMenu },
@@ -331,17 +357,27 @@ export function ContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const [adjustedPosition, setAdjustedPosition] = useState(position);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
 
     if (menuRef.current) {
       const rect = menuRef.current.getBoundingClientRect();
-      const x = Math.min(position.x, window.innerWidth - rect.width - 8);
-      const y = Math.min(position.y, window.innerHeight - rect.height - 8);
+      const x = Math.max(
+        8,
+        Math.min(position.x, window.innerWidth - rect.width - 8),
+      );
+      const y = Math.max(
+        8,
+        Math.min(position.y, window.innerHeight - rect.height - 8),
+      );
       setAdjustedPosition({ x, y });
     } else {
       setAdjustedPosition(position);
     }
+  }, [open, position]);
+
+  useEffect(() => {
+    if (!open) return;
 
     const handleGlobalClick = (e: globalThis.MouseEvent) => {
       // Allow clicking inside the menu without closing immediately
@@ -369,7 +405,7 @@ export function ContextMenu({
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("blur", onClose);
     };
-  }, [open, position, onClose]);
+  }, [open, onClose]);
 
   useEffect(() => {
     if (open && focusFirstItem) {
@@ -385,7 +421,7 @@ export function ContextMenu({
     <div
       ref={menuRef}
       data-tour={dataTour}
-      className="fixed z-50 min-w-40 animate-fade-in overflow-hidden rounded-md border border-border bg-surface py-1 shadow-raised"
+      className="fixed z-50 max-h-[calc(100vh-1rem)] min-w-40 animate-fade-in overflow-x-hidden overflow-y-auto rounded-md border border-border bg-surface py-1 shadow-raised"
       style={{
         top: adjustedPosition.y,
         left: adjustedPosition.x,
@@ -402,15 +438,27 @@ export function ContextMenuSeparator() {
   return <div className="mx-2 my-1 h-px bg-border" />;
 }
 
+export function ContextMenuHeading({ children }: { children: ReactNode }) {
+  return (
+    <div className="mx-2 mb-1 mt-1 border-t border-border px-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-faint first:mt-0 first:border-t-0 first:pt-1">
+      {children}
+    </div>
+  );
+}
+
 export function ContextMenuItem({
   icon: Icon,
   danger,
+  disabled,
+  title,
   onClick,
   children,
   dataTour,
 }: {
   icon?: LucideIcon;
   danger?: boolean;
+  disabled?: boolean;
+  title?: string;
   onClick: () => void;
   children: ReactNode;
   dataTour?: string;
@@ -419,8 +467,11 @@ export function ContextMenuItem({
     <button
       data-tour={dataTour}
       type="button"
+      disabled={disabled}
+      title={title}
       className={clsx(
         "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors",
+        disabled && "cursor-not-allowed opacity-50",
         danger
           ? "text-danger hover:bg-danger-tint"
           : "text-text hover:bg-surface-hover",
